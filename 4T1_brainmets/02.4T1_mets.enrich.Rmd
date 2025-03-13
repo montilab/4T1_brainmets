@@ -1,0 +1,207 @@
+---
+title: "4T1 Mets RNA Seq - Enrichment Analysis"
+author: "Andrew Chen"
+date:   "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: 'united'
+    toc: true
+    toc_depth: 1
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE, fig.height = 6)
+```
+
+```{r}
+library(Biobase)
+library(SummarizedExperiment)
+library(openxlsx)
+library(stringr)
+library(tidyverse)
+library(ggplot2)
+library(reactable)
+library(hypeR)
+ggplot2::theme_set(theme(axis.text=element_text(size=12),
+                         plot.title=element_text(size=15, vjust=3),
+                         plot.margin = unit(c(1,1,1,1), "cm")))
+PATH <- file.path(Sys.getenv("MLAB"),"projects/brcameta/exosome/4t1_brca_brain_mets/")
+DPATH <- file.path(Sys.getenv("CBM"),"otherStudies/RNAseq/2022-06-03-DenisExosomeBrCaBrainMets/")
+
+do_save <- TRUE
+```
+
+# Loading Signatures and Data
+```{r}
+all_sigs <- readRDS(file.path(PATH,"data/signatures_symbol.rds"))
+all_sigs <- all_sigs[lapply(all_sigs, length) != 0]
+names(all_sigs) <- c("IR Control Up", "Control Up", "IR Up", "IR Control Dn", "Control Dn", "IR Down")
+deseq_list <- readRDS(file.path(PATH,"data/deseq_list.rds"))
+
+# PAMM Genelists
+pamm_paths <- Sys.glob(file.path(PATH, "data/PAMM_Genelists/*"))
+pamm_names <- lapply(pamm_paths, stringr::str_match, pattern="genelist-\\s*(.*?)\\s*.xlsx")
+pamm_names <- unlist(lapply(pamm_names, function(x) x[2]))
+
+pamm_genelists <- lapply(pamm_paths, openxlsx::read.xlsx, colNames = FALSE)
+pamm_genelists <- lapply(pamm_genelists, function(x) x$X2)
+names(pamm_genelists) <- pamm_names
+
+hallmark_genesets <- msigdb_download(species="Mus musculus", category="H")
+
+dat <- readRDS(file.path(PATH,"data/4T1_mets_sExp.rds"))
+background <- unique(unlist(SummarizedExperiment::rowData(dat)$mgi_symbol))
+
+#Other genesets
+methyltransferase_genes <- read.delim(file.path(PATH, "data/methyltransferase_genes_ncbi.txt"))
+dnmt_genes <- methyltransferase_genes$Symbol[methyltransferase_genes$Symbol %in% background]
+
+hallmark_genesets$DNMT <- dnmt_genes
+h3_meth_genes <- c("PRC1", "PRC2", "EZH2", "EED", "SUZ12", "RING1", "RNF2", "BRD2", "BRD3", "BRD4", "KDM1A", "KDM2A", "KDM3A", "KDM4A", "KDM5A")
+library(babelgene)
+mouse_h3_meth_genes <- babelgene::orthologs(genes = h3_meth_genes, species = "mouse")
+hallmark_genesets$H3METH <- mouse_h3_meth_genes$symbol
+names(hallmark_genesets) <- names(hallmark_genesets) %>% str_replace_all(., "_",  " ") %>% str_to_title %>% str_replace_all(., "Hallmark ", "")
+```
+
+# hypeR enrichment (HyperGeometric) {.tabset}
+
+## Hallmark Mouse
+
+```{r}
+hall_hyp <- hypeR::hypeR(all_sigs,genesets=hallmark_genesets,background=background, test="hypergeometric", fdr=0.05)
+hypeR::hyp_dots(hall_hyp,merge=TRUE,top=30) + 
+  scale_color_gradient(
+    name = "FDR",
+    low = "red", high = "black",
+    breaks = c(0.001, 0.005, 0.01) # Specify the breakpoints
+  )
+```
+
+```{r}
+hypeR::rctbl_build(hall_hyp)
+```
+
+
+## PAMM
+
+```{r}
+pamm_hyp <- hypeR::hypeR(all_sigs,genesets=pamm_genelists,background=background,fdr=0.05)
+hypeR::hyp_dots(pamm_hyp,merge=TRUE,top=25)
+```
+
+```{r}
+hypeR::rctbl_build(pamm_hyp)
+```
+
+```{r}
+if (do_save) {
+  hypeR::hyp_to_excel(hall_hyp,file.path(PATH,"data/hallmark_hyp.xlsx"))
+}
+```
+
+# KS-based enrichment {.tabset}
+```{r}
+## Add gene symbols to DESeq tables
+if (do_save) {
+  deseq_list <- lapply(deseq_list, function(Z) {
+  as.data.frame(Z) %>% 
+    tibble::rownames_to_column(var="ensembl_id") %>%
+    dplyr::mutate(geneID=unlist(rowData(dat)[ensembl_id,"mgi_symbol"]))
+  })
+}
+```
+
+```{r}
+## rank by up-regulation
+rank_signatures_up <- lapply(
+  deseq_list, function(sig) sig %>% 
+    dplyr::filter(geneID!="") %>%
+    dplyr::arrange(desc(log2FoldChange)) %>%
+    dplyr::select(geneID,log2FoldChange) %>%
+    tibble::deframe())
+names(rank_signatures_up) <- paste(names(rank_signatures_up),"up",sep="_")
+
+## rank by down-regulation
+rank_signatures_dn <- lapply(
+  deseq_list,function(sig) sig %>% 
+    dplyr::filter(geneID!="") %>%
+    dplyr::arrange(log2FoldChange) %>%
+    dplyr::select(geneID,log2FoldChange) %>%
+    tibble::deframe())
+names(rank_signatures_dn) <- paste(names(rank_signatures_dn),"dn",sep="_")
+
+rank_signatures <- c(rank_signatures_up,rank_signatures_dn)
+rank_signatures <- rank_signatures[order(names(rank_signatures),decreasing = TRUE)]
+names(rank_signatures) <- c("IR Up", "IR Dn", "IR Control Up", "IR Control Dn", "Control Up", "Control Down")
+```
+
+## Hallmarks + Pamm
+
+```{r}
+all_genesets <- c(hallmark_genesets, pamm_genelists)
+max_fdr <- 0.05
+ks_hall <- hypeR::hypeR(signature=rank_signatures,genesets=all_genesets,test="ks",fdr=max_fdr,plotting=TRUE)
+hyp_dots(ks_hall,merge=TRUE,fdr=max_fdr/5,top=25) + ggtitle(paste("FDR ≤", max_fdr/5))
+```
+
+```{r}
+hypeR::rctbl_build(ks_hall, show_hmaps=FALSE)
+```
+
+## Just IR IS
+```{r}
+all_genesets <- c(hallmark_genesets, pamm_genelists)
+max_fdr <- 0.05
+ks_hall <- hypeR::hypeR(signature=rank_signatures[c("IR Up", "Control Up")],
+                        genesets=all_genesets,
+                        test="ks",
+                        fdr=max_fdr,
+                        plotting=TRUE)
+hyp_dots(ks_hall,merge=TRUE,fdr=max_fdr,top=30, size_by="none") + ggtitle(paste("FDR ≤", max_fdr))
+```
+
+## Just pathways of interest
+```{r}
+select_genesets <- c("Hypoxia", "Mitotic Spindle", "Mouse Angiogensis", "Mouse Cancer Stem Cell", "Tgf Beta Signaling", "Mouse EMT genes", "Tnfa Signaling Via Nfkb", "Mtorc1 Signaling")
+
+ks_hall$data$`IR Up`$data <- ks_hall$data$`IR Up`$data %>% filter(label %in% select_genesets)
+ks_hall$data$`Control Up`$data <- ks_hall$data$`Control Up`$data %>% filter(label %in% select_genesets)
+hyp_dots(ks_hall,merge=TRUE,fdr=max_fdr,top=16, size_by="none") + ggtitle(paste("FDR ≤", max_fdr))
+```
+
+
+# KS Scree Plot {.tabset}
+
+## IR IS Up
+```{r}
+print(ks_hall$data$`IR Up`$plots[ks_hall$data$`IR Up`$data$fdr<=0.01])
+```
+
+## IR IS Dn
+```{r}
+print(ks_hall$data$`IR Dn`$plots[ks_hall$data$`IR Dn`$data$fdr<=0.01])
+```
+
+## Control IS Up
+```{r}
+print(ks_hall$data$`Control Up`$plots[ks_hall$data$`Control Up`$data$fdr<=0.01])
+```
+
+## Control IS Dn
+```{r}
+print(ks_hall$data$`Control Down`$plots[ks_hall$data$`Control Down`$data$fdr<=0.01])
+```
+
+## IR Control Up
+```{r}
+print(ks_hall$data$`Control Up`$plots[ks_hall$data$`Control Up`$data$fdr<=0.01])
+```
+
+## IR Control Dn
+```{r}
+print(ks_hall$data$`IR Control Up`$plots[ks_hall$data$`IR Control Dn`$data$fdr<=0.01])
+```

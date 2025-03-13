@@ -1,0 +1,231 @@
+---
+title: "Pablo RNA Seq - Enrichment"
+author: "Andrew Chen"
+date:   "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: 'united'
+    toc: true
+    toc_depth: 1
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+```{r}
+library(Biobase)
+library(SummarizedExperiment)
+library(openxlsx)
+library(stringr)
+library(tidyverse)
+library(ggplot2)
+library(reactable)
+library(hypeR)
+library(EnsDb.Hsapiens.v86)
+library(babelgene)
+PATH <- file.path(Sys.getenv("MLAB"),"projects/brcameta/projects/exosome/4t1_primary_tumor/")
+DPATH <- file.path(Sys.getenv("CBM"),"otherStudies/RNAseq/")
+```
+
+# Loading Signatures and Data
+```{r}
+dds_invitro_1514_scrna <- read.csv(file.path(PATH, "data/dds_invitro_mir1514D_scrna4D_diffanal.csv"), row.names = 1)
+dds_invitro_1454_scrna <- read.csv(file.path(PATH, "data/dds_invitro_mir1454D_scrna4D_diffanal.csv"), row.names = 1)
+dds_invivo_145_scrna <- read.csv(file.path(PATH, "data/dds_invivo_mir145_scrna_diffanal.csv"), row.names = 1)
+dds_invivo_iris <- read.csv(file.path(PATH, "data/dds_invivo_iris_diffanal.csv"), row.names = 1)
+dds_invivo_ir_ctrl <- read.csv(file.path(PATH, "data/dds_invivo_ir_control_diffanal.csv"), row.names = 1)
+
+# Preparing Signatures
+invitro_1514_sc_up <- dds_invitro_1514_scrna %>% dplyr::filter(log2FoldChange > 0) %>% pull(symbol)
+invitro_1454_sc_up <- dds_invitro_1454_scrna %>% dplyr::filter(log2FoldChange > 0) %>% pull(symbol)
+invivo_miR_sc_up <- dds_invivo_145_scrna %>% dplyr::filter(log2FoldChange > 0) %>% pull(symbol)
+invivo_ir_is_up <- dds_invivo_iris %>% dplyr::filter(log2FoldChange > 0) %>% pull(symbol)
+invivo_ir_ctrl_up <- dds_invivo_ir_ctrl %>% dplyr::filter(log2FoldChange > 0) %>% pull(symbol)
+
+invitro_1514_sc_dn <- dds_invitro_1514_scrna %>% dplyr::filter(log2FoldChange < 0) %>% pull(symbol)
+invitro_1454_sc_dn <- dds_invitro_1454_scrna %>% dplyr::filter(log2FoldChange < 0) %>% pull(symbol)
+# O genes for miR_sc_dn
+# invivo_miR_sc_dn <- dds_invivo_145_scrna %>% dplyr::filter(log2FoldChange < 0) %>% pull(symbol) 
+invivo_ir_is_dn <- dds_invivo_iris %>% dplyr::filter(log2FoldChange < 0) %>% pull(symbol)
+invivo_ir_ctrl_dn <- dds_invivo_ir_ctrl %>% dplyr::filter(log2FoldChange < 0) %>% pull(symbol)
+
+invitro_sigs <- list(mir1514_sc_up=invitro_1514_sc_up, mir1454_sc_up=invitro_1454_sc_up,
+                     mir1514_sc_dn=invitro_1514_sc_dn, mir1454_sc_dn=invitro_1454_sc_dn)
+
+invivo_sigs <- list(miR145_sc_up=invivo_miR_sc_up, ir_is_up=invivo_ir_is_up, ir_ctrl_up=invivo_ir_ctrl_up,
+                   ir_is_dn=invivo_ir_is_dn, ir_ctrl_dn=invivo_ir_ctrl_dn)
+invitro_sigs <- lapply(invitro_sigs, function(x) x[!is.na(x)])
+invivo_sigs <- lapply(invivo_sigs, function(x) x[!is.na(x)])
+# Downloading Hallmark
+hallmark_mouse_genesets <- msigdb_download(species="Mus musculus", category="H")
+names(hallmark_mouse_genesets) <- clean_genesets(names(hallmark_mouse_genesets))
+
+# Downloading KEGG
+kegg_mouse_genesets <- hypeR::enrichr_download("KEGG_2019_Mouse")
+kegg_mouse_genesets <- lapply(kegg_mouse_genesets, function(x) orthologs(genes = x, species = "mouse")$symbol)
+
+# Background is the number of rows as genes have already been filtered based on a baseline expression threshold across samples.
+invitro.filtered <- readRDS(file.path(PATH,"data/yuhan_invitro.rds"))
+invivo.filtered <- readRDS(file.path(PATH,"data/yuhan_invivo.rds"))
+
+invitro_background <- length(unique(rownames(invitro.filtered)))
+invivo_background <- length(unique(rownames(invivo.filtered)))
+```
+
+
+# Hypergeometric {.tabset}
+
+## Hallmark {.tabset}
+
+### Invitro 
+```{r}
+hall_hyp <- hypeR::hypeR(invitro_sigs,genesets=hallmark_mouse_genesets,background=invitro_background, test="hypergeometric", fdr=0.05)
+hypeR::hyp_dots(hall_hyp,merge=TRUE,top=15)
+```
+
+```{r}
+hypeR::rctbl_build(hall_hyp)
+```
+
+```{r}
+hypeR::hyp_to_excel(hall_hyp, file.path(PATH, "data/invitro_hyp_hallmark_results.xlsx"))
+```
+
+## mir1454 Only
+```{r}
+hall_hyp <- hypeR::hypeR(invitro_sigs[c("mir1454_sc_up","mir1454_sc_dn")],genesets=hallmark_mouse_genesets,background=invitro_background, test="hypergeometric", fdr=0.05)
+hypeR::hyp_dots(hall_hyp,merge=TRUE,top=15)
+```
+
+
+### invivo
+```{r}
+hall_hyp <- hypeR::hypeR(invivo_sigs,genesets=hallmark_mouse_genesets,background=invivo_background, test="hypergeometric", fdr=0.05)
+hypeR::hyp_dots(hall_hyp,merge=TRUE,top=15)
+```
+
+```{r}
+hypeR::rctbl_build(hall_hyp)
+```
+
+```{r}
+hypeR::hyp_to_excel(hall_hyp, file.path(PATH, "data/invivo_hyp_hallmark_results.xlsx"))
+```
+
+## KEGG {.tabset}
+
+### Invitro
+```{r}
+hall_hyp <- hypeR::hypeR(invitro_sigs,genesets=kegg_mouse_genesets,background=invitro_background, test="hypergeometric", fdr=0.05)
+hypeR::hyp_dots(hall_hyp,merge=TRUE,top=15)
+```
+
+```{r}
+hypeR::rctbl_build(hall_hyp)
+```
+
+```{r}
+hypeR::hyp_to_excel(hall_hyp, file.path(PATH, "data/invitro_hyp_kegg_results.xlsx"))
+```
+
+### Invivo
+```{r}
+hall_hyp <- hypeR::hypeR(invivo_sigs,genesets=kegg_mouse_genesets,background=invivo_background, test="hypergeometric", fdr=0.05)
+hypeR::hyp_dots(hall_hyp,merge=TRUE,top=15)
+```
+
+```{r}
+hypeR::rctbl_build(hall_hyp)
+```
+
+```{r}
+hypeR::hyp_to_excel(hall_hyp, file.path(PATH, "data/invivo_hyp_kegg_results.xlsx"))
+```
+
+# KS-based enrichment {.tabset}
+```{r}
+invitro_1514_scrna_rank_list <- dds_invitro_1514_scrna$symbol[!(is.na(dds_invitro_1514_scrna$symbol))] 
+invitro_1454_scrna_rank_list <- dds_invitro_1454_scrna$symbol[!(is.na(dds_invitro_1454_scrna$symbol))] 
+invivo_mir145_scrna_rank_list <- dds_invivo_145_scrna$symbol[!(is.na(dds_invivo_145_scrna$symbol))] 
+invivo_iris_scrna_rank_list <- dds_invivo_iris$symbol[!(is.na(dds_invivo_iris$symbol))] 
+invivo_ir_ctrl_scrna_rank_list <- dds_invivo_ir_ctrl$symbol[!(is.na(dds_invivo_ir_ctrl$symbol))] 
+
+all_invitro_ks <- list(invitro_1514_scrna_up = invitro_1514_scrna_rank_list, invitro_1514_scrna_dn = rev(invitro_1514_scrna_rank_list),
+                       invitro_1454_scrna_up = invitro_1454_scrna_rank_list, invitro_1454_scrna_dn = rev(invitro_1454_scrna_rank_list))
+all_invivo_ks <- list(invivo_154_scrna_up = invivo_mir145_scrna_rank_list, invivo_154_scrna_dn = rev(invivo_mir145_scrna_rank_list),
+                      invivo_ir_is_up = invivo_iris_scrna_rank_list, invivo_ir_is_dn = rev(invivo_iris_scrna_rank_list),
+                      invivo_ir_ctrl_up = invivo_ir_ctrl_scrna_rank_list, invivo_ir_ctrl_dn = rev(invivo_ir_ctrl_scrna_rank_list))
+
+```
+
+## Hallmark {.tabset}
+
+### Invitro  
+
+```{r}
+max_fdr <- 0.05
+ks_hall <- hypeR::hypeR(signature=all_invitro_ks,genesets=hallmark_mouse_genesets,test="kstest",fdr=max_fdr,plotting=TRUE)
+hyp_dots(ks_hall,merge=TRUE,fdr=max_fdr,top=20) + ggtitle(paste("FDR ≤", max_fdr))
+```
+
+```{r}
+hypeR::rctbl_build(ks_hall, show_hmaps=FALSE)
+```
+
+```{r}
+hypeR::hyp_to_excel(hall_hyp, file.path(PATH, "data/invitro_ks_hallmark_results.xlsx"))
+```
+
+### Invivo
+
+```{r}
+max_fdr <- 0.05
+ks_hall <- hypeR::hypeR(signature=all_invivo_ks,genesets=hallmark_mouse_genesets,test="kstest",fdr=max_fdr,plotting=TRUE)
+hyp_dots(ks_hall,merge=TRUE,fdr=max_fdr,top=20) + ggtitle(paste("FDR ≤", max_fdr))
+```
+
+```{r}
+hypeR::rctbl_build(ks_hall, show_hmaps=FALSE)
+```
+
+```{r}
+hypeR::hyp_to_excel(hall_hyp, file.path(PATH, "data/invivo_ks_hallmark_results.xlsx"))
+```
+
+## Kegg {.tabset}
+
+### Invitro 
+
+```{r}
+max_fdr <- 0.05
+ks_hall <- hypeR::hypeR(signature=all_invitro_ks,genesets=kegg_mouse_genesets,test="kstest",fdr=max_fdr,plotting=TRUE)
+hyp_dots(ks_hall,merge=TRUE,fdr=max_fdr,top=20) + ggtitle(paste("FDR ≤", max_fdr))
+```
+
+```{r}
+hypeR::rctbl_build(ks_hall, show_hmaps=FALSE)
+```
+
+```{r}
+hypeR::hyp_to_excel(hall_hyp, file.path(PATH, "data/invitro_ks_kegg_results.xlsx"))
+```
+
+### Invivo
+
+```{r}
+max_fdr <- 0.05
+ks_hall <- hypeR::hypeR(signature=all_invivo_ks,genesets=kegg_mouse_genesets,test="kstest",fdr=max_fdr,plotting=TRUE)
+hyp_dots(ks_hall,merge=TRUE,fdr=max_fdr,top=20) + ggtitle(paste("FDR ≤", max_fdr))
+```
+
+```{r}
+hypeR::rctbl_build(ks_hall, show_hmaps=FALSE)
+```
+
+```{r}
+hypeR::hyp_to_excel(hall_hyp, file.path(PATH, "data/invivo_ks_kegg_results.xlsx"))
+```

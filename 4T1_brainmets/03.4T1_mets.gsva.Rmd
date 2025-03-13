@@ -1,0 +1,237 @@
+---
+title: "4T1 Mets RNA Seq - GSVA"
+author: "Andrew Chen"
+date:   "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: 'united'
+    toc: true
+    toc_depth: 1
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+```{r}
+library(GSVA)
+library(hypeR)
+library(Biobase)
+library(babelgene)
+library(tidyverse)
+library(cba)
+library(ComplexHeatmap)
+library(circlize)
+library(openxlsx)
+
+PATH <- file.path(Sys.getenv("MLAB"), "projects/brcameta/exosome/4t1_brca_brain_mets/")
+TCGAPATH <- file.path(Sys.getenv("CBM"),"TCGA-GDC/")
+METABRICPATH <- file.path(Sys.getenv("CBM"), "METABRIC/")
+DPATH <- file.path(Sys.getenv("CBM"),"otherStudies/RNAseq/2022-06-03-DenisExosomeBrCaBrainMets/")
+
+do_save <- FALSE
+```
+
+# Loading data
+```{r}
+tcga_brca <- readRDS(file.path(TCGAPATH,"/esets_filtered/TCGA-BRCA_2020-03-22_DESeq2_log_filtered_eset.rds"))
+
+metabric <- readRDS(file.path(METABRICPATH, "ESets/metabric_GE_ESet.rds"))
+metabric_impute <- readRDS(file.path(METABRICPATH, "ESets/metabric_GE_ESet_impute.rds"))
+```
+
+```{r}
+table(pData(tcga_brca)%>% select(c("sample_type","disease_type")))
+```
+
+```{r}
+table(metabric$SAMPLE_TYPE, metabric$CANCER_TYPE_DETAILED)
+```
+
+```{r}
+table(pData(tcga_brca)$subtype_selected)
+```
+
+```{r}
+metabric$Pam50_SUBTYPE %>% table
+```
+
+
+# Loading Signatures
+```{r}
+#Signatures
+
+all_sigs <- readRDS(file.path(PATH,"data/signatures_symbol.rds"))
+all_sigs <- all_sigs[lapply(all_sigs, length) > 1]
+
+all_sigs_human <- lapply(all_sigs, babelgene::orthologs, species="mouse", human=FALSE)
+all_sigs_human <- lapply(all_sigs_human, function (x) x %>% dplyr::pull(human_symbol))
+
+hallmark_genesets <- msigdb_download(species="Homo sapiens", category="H")
+```
+
+```{r}
+# Number of genes from each set that are present in tcga
+data.frame(length = unlist(lapply(all_sigs_human, length)),
+           in_tcga = unlist(lapply(all_sigs_human, function(x) sum(unlist(lapply(x, function(i) i %in% rownames(tcga_brca)))))))
+```
+
+# GSVA {.tabset}
+```{r}
+if (do_save) {
+  tcga_gsva <- gsva(tcga_brca, all_sigs_human, mx.diff=TRUE, verbose=FALSE)
+  metabric_gsva <- gsva(metabric, all_sigs_human, mx.diff=TRUE, verbose=FALSE)
+  saveRDS(metabric_gsva, file.path(PATH, "data/metabric_gsva_res.rds"))
+  saveRDS(tcga_gsva, file.path(PATH, "data/tcga_gsva_res.rds"))  
+} else {
+  tcga_gsva <- readRDS(file.path(PATH, "data/tcga_gsva_res.rds"))
+  metabric_gsva <- readRDS(file.path(PATH, "data/metabric_gsva_res.rds"))
+}
+```
+
+```{r}
+print(dim(tcga_gsva))
+```
+
+## Heatmap by Tumor Type {.tabset}
+
+### TCGA
+```{r}
+sample_col <- hcl.colors(n=nlevels(tcga_brca$sample_type %>% factor))
+names(sample_col) <- levels(tcga_brca$sample_type %>% factor)
+ha.genes <- HeatmapAnnotation(sample_type=tcga_brca$sample_type,
+                              col=list(sample_type=sample_col))
+
+png(file=file.path(PATH, "results/GSVA_tcga_Heatmap.png"))
+gsva_heatmap <- Heatmap(t(scale(t(exprs(tcga_gsva)))),
+        name="Enrichment Score", 
+        col=colorRamp2(c(-3, 0, 3), c("#072448", "white", "#ff6150")),
+        top_annotation=ha.genes, 
+        cluster_rows=TRUE,
+        cluster_columns=TRUE,
+        clustering_distance_rows="euclidean",
+        clustering_method_rows="ward.D",    
+        clustering_distance_columns="euclidean",
+        clustering_method_columns="ward.D", 
+        show_parent_dend_line=TRUE,
+        column_title = "samples",
+        column_dend_height = unit(5, "mm"),
+        row_title="Genesets",
+        row_dend_width = unit(5, "mm"),
+        show_column_names=FALSE,
+        show_row_names=TRUE)
+draw(gsva_heatmap)
+dev.off()
+gsva_heatmap
+```
+
+## Heatmap by Cancer Stage
+```{r}
+sample_col <- hcl.colors(n=nlevels(tcga_brca$tumor_stage %>% factor))
+names(sample_col) <- levels(tcga_brca$tumor_stage %>% factor)
+ha.genes <- HeatmapAnnotation(sample_type=tcga_brca$tumor_stage,
+                              col=list(sample_type=sample_col))
+
+png(file=file.path(PATH, "results/GSVA_Heatmap_cancer_stage.png"))
+gsva_heatmap <- Heatmap(t(scale(t(exprs(tcga_gsva)))),
+        name="Enrichment Score", 
+        col=colorRamp2(c(-3, 0, 3), c("#072448", "white", "#ff6150")),
+        top_annotation=ha.genes, 
+        cluster_rows=TRUE,
+        cluster_columns=TRUE,
+        clustering_distance_rows="euclidean",
+        clustering_method_rows="ward.D",    
+        clustering_distance_columns="euclidean",
+        clustering_method_columns="ward.D", 
+        show_parent_dend_line=TRUE,
+        column_title = "samples",
+        column_dend_height = unit(5, "mm"),
+        row_title="Genesets",
+        row_dend_width = unit(5, "mm"),
+        show_column_names=FALSE,
+        show_row_names=TRUE)
+draw(gsva_heatmap)
+dev.off()
+gsva_heatmap
+```
+
+## Heatmap by Cancer Subtype {.tabset}
+
+### TCGA
+```{r}
+sample_col <- hcl.colors(n=nlevels(tcga_brca$subtype_selected %>% factor))
+names(sample_col) <- levels(tcga_brca$subtype_selected %>% factor)
+ha.genes <- HeatmapAnnotation(sample_type=tcga_brca$subtype_selected,
+                              col=list(sample_type=sample_col))
+
+png(file=file.path(PATH, "results/GSVA_Heatmap_subtype.png"))
+gsva_heatmap <- Heatmap(t(scale(t(exprs(tcga_gsva)))),
+        name="Enrichment Score", 
+        col=colorRamp2(c(-3, 0, 3), c("#072448", "white", "#ff6150")),
+        top_annotation=ha.genes, 
+        cluster_rows=TRUE,
+        cluster_columns=TRUE,
+        clustering_distance_rows="euclidean",
+        clustering_method_rows="ward.D",    
+        clustering_distance_columns="euclidean",
+        clustering_method_columns="ward.D", 
+        show_parent_dend_line=TRUE,
+        column_title = "samples",
+        column_dend_height = unit(5, "mm"),
+        row_title="Genesets",
+        row_dend_width = unit(5, "mm"),
+        show_column_names=FALSE,
+        show_row_names=TRUE)
+draw(gsva_heatmap)
+dev.off()
+gsva_heatmap
+```
+
+### Metabric
+```{r}
+sample_col <- hcl.colors(n=nlevels(metabric$Pam50_SUBTYPE %>% factor))
+names(sample_col) <- levels(metabric$Pam50_SUBTYPE %>% factor)
+ha.genes <- HeatmapAnnotation(sample_type=metabric$Pam50_SUBTYPE,
+                              col=list(Pam50_SUBTYPE=sample_col))
+
+png(file=file.path(PATH, "results/GSVA_Metabric_Heatmap.png"))
+gsva_heatmap <- Heatmap(t(scale(t(exprs(metabric_gsva)))),
+        name="Enrichment Score", 
+        col=colorRamp2(c(-3, 0, 3), c("#072448", "white", "#ff6150")),
+        top_annotation=ha.genes, 
+        cluster_rows=TRUE,
+        cluster_columns=TRUE,
+        clustering_distance_rows="euclidean",
+        clustering_method_rows="ward.D",    
+        clustering_distance_columns="euclidean",
+        clustering_method_columns="ward.D", 
+        show_parent_dend_line=TRUE,
+        column_title = "samples",
+        column_dend_height = unit(5, "mm"),
+        row_title="Genesets",
+        row_dend_width = unit(5, "mm"),
+        show_column_names=FALSE,
+        show_row_names=TRUE)
+draw(gsva_heatmap)
+dev.off()
+gsva_heatmap
+```
+
+# PCA Plots 
+```{r}
+pc <- prcomp(exprs(tcga_gsva),
+             center = TRUE,
+            scale. = TRUE)
+
+pc_df <- as.data.frame(pc$rotation)
+pc_df$sample_type = tcga_brca$sample_type
+```
+
+```{r}
+pc_df %>% ggplot() + geom_point(aes(x=PC1, y=PC2, color = sample_type))
+```
+
+

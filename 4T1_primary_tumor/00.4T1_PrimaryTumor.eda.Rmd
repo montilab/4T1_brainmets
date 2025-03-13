@@ -1,0 +1,305 @@
+---
+title: "Yuhan Primary Tumor RNA Seq - EDA"
+author: "Andrew Chen"
+date:   "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: 'united'
+    toc: true
+    toc_depth: 1
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+    fig_width: 6
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+```{r settings}
+library(reshape2)
+library(pheatmap)
+library(mclust)
+library(SummarizedExperiment)
+library(DESeq2)
+library(tidyverse)
+library(readxl)
+
+PATH <- file.path(Sys.getenv("MLAB"),"projects/brcameta/projects/exosome/4t1_primary_tumor/")
+DPATH <- file.path(Sys.getenv("CBM"),"otherStudies/RNAseq/")
+source(file.path(Sys.getenv("CBMGIT"),"MLscripts/R/rm_low_rnaseq_counts.R"))
+
+do_save <- TRUE
+```
+
+# Loading Data
+```{r}
+invitro_se <- readRDS(file.path(DPATH, "2024-10-15_Yuhan_miRNA_4T1/processed/star_salmon/salmon.merged.gene_counts.rds"))
+
+invivo_se <- readRDS(file.path(DPATH, "2024-10-15_Yuhan_PrimaryTumor/processed/star_salmon/salmon.merged.gene_counts.rds"))
+```
+
+## Gene Filtering
+```{r}
+# Removing genes with less than 1 read per million across 3 samples.
+# Over 30K genes are removed in this step.
+invitro.filtered <- rm_low_rnaseq_counts(invitro_se, min_samples = 3)
+invivo.filtered <- rm_low_rnaseq_counts(invivo_se, min_samples = 3)
+
+invitro.filtered@colData[invitro.filtered@colData$files == "miR1514D_4", "files"] <- "miR1454D_2"
+rownames(invitro.filtered@colData) <- invitro.filtered@colData$files
+colnames(invitro.filtered) <- colnames(invitro.filtered@assays@data$counts) <- colnames(invitro.filtered@assays@data$abundance) <- rownames(invitro.filtered@colData)
+```
+
+## Redefining ColData
+```{r}
+invitro.filtered@colData <- invitro.filtered@colData %>% 
+  as.data.frame %>% 
+  dplyr::select(files) %>% 
+  tidyr::separate(files, into = c("Condition", "Replicate"), sep = "_(?=[^_]*$)") %>% 
+  S4Vectors::DataFrame()
+colnames(invitro.filtered) <- rownames(invitro.filtered@colData)
+colnames(invitro.filtered@assays@data$counts) <- rownames(invitro.filtered@colData)
+colnames(invitro.filtered@assays@data$abundance) <- rownames(invitro.filtered@colData)
+
+invivo.filtered@colData <- invivo.filtered@colData %>% 
+  as.data.frame %>% 
+  dplyr::select(files) %>% 
+  tidyr::separate(files, into = c("Condition", "Replicate"), sep = "_(?=[^_]*$)") %>% 
+  S4Vectors::DataFrame()
+colnames(invivo.filtered) <- rownames(invivo.filtered@colData)
+colnames(invivo.filtered@assays@data$counts) <- rownames(invivo.filtered@colData)
+colnames(invivo.filtered@assays@data$abundance) <- rownames(invivo.filtered@colData)
+```
+
+```{r}
+invitro.filtered@colData %>% as.data.frame %>% dplyr::count(Condition)
+```
+
+
+```{r}
+invivo.filtered@colData %>% as.data.frame %>% dplyr::count(Condition)
+```
+
+# DESeq Sample-Level normalization
+```{r}
+#DESeq objects
+dds <- DESeq2::DESeqDataSetFromMatrix(countData=round(invitro.filtered@assays@data$counts),
+                                      colData=invitro.filtered@colData,
+                                      design=~Condition)
+dds <- estimateSizeFactors(dds)
+
+invitro.filtered@assays@data$rle <- counts(dds, normalized=TRUE)    
+invitro.filtered@assays@data$rle_log2 <- log2(invitro.filtered@assays@data$rle + 1)
+```
+
+```{r}
+#DESeq objects
+dds <- DESeq2::DESeqDataSetFromMatrix(countData=round(invivo.filtered@assays@data$counts),
+                                      colData=invivo.filtered@colData,
+                                      design=~Condition)
+dds <- estimateSizeFactors(dds)
+
+invivo.filtered@assays@data$rle <- counts(dds, normalized=TRUE)    
+invivo.filtered@assays@data$rle_log2 <- log2(invivo.filtered@assays@data$rle + 1)
+```
+
+# Save data
+```{r}
+if(do_save) {
+  saveRDS(invitro.filtered,file=file.path(PATH,"data/yuhan_invitro.rds"))
+  saveRDS(invivo.filtered,file=file.path(PATH,"data/yuhan_invivo.rds"))
+} else {
+  invitro.filtered <- readRDS(file.path(PATH,"data/yuhan_invitro.rds"))
+  invivo.filtered <- readRDS(file.path(PATH,"data/yuhan_invivo.rds"))
+}
+
+```
+
+# Visualizing Heteroskedasticity
+
+## Mad vs Median {.tabset}
+
+### invitro
+```{r}
+invitro.df <- data.frame(raw_median=matrixStats::rowMedians(invitro.filtered@assays@data$counts %>% as.matrix, na.rm=TRUE),
+                 raw_mad=matrixStats::rowMads(invitro.filtered@assays@data$counts %>% as.matrix, na.rm=TRUE),
+                 median=matrixStats::rowMedians(invitro.filtered@assays@data$rle_log2 %>% as.matrix, na.rm=TRUE),
+                 mad=matrixStats::rowMads(invitro.filtered@assays@data$rle_log2 %>% as.matrix, na.rm=TRUE))
+
+ggplot2::ggplot(invitro.df,aes(x=raw_median,y=raw_mad)) +
+  geom_point() + 
+  geom_smooth(mmethod = "loess") +
+  labs(title = "Raw Mad vs Median")
+```
+
+### invivo
+```{r}
+invivo.df <- data.frame(raw_median=matrixStats::rowMedians(invivo.filtered@assays@data$counts %>% as.matrix, na.rm=TRUE),
+                 raw_mad=matrixStats::rowMads(invivo.filtered@assays@data$counts %>% as.matrix, na.rm=TRUE),
+                 median=matrixStats::rowMedians(invivo.filtered@assays@data$rle_log2 %>% as.matrix, na.rm=TRUE),
+                 mad=matrixStats::rowMads(invivo.filtered@assays@data$rle_log2 %>% as.matrix, na.rm=TRUE))
+
+ggplot2::ggplot(invivo.df,aes(x=raw_median,y=raw_mad)) +
+  geom_point() + 
+  geom_smooth(mmethod = "loess") +
+  labs(title = "Raw Mad vs Median")
+```
+
+
+## Log+library normalized Mad vs Median {.tabset}
+
+### invitro
+```{r}
+ggplot2::ggplot(invitro.df,aes(x=median,y=mad)) +
+  geom_point() +
+  geom_smooth(mmethod = "loess") + 
+  labs(title = "Normalized Mad vs Median")
+```
+
+### invivo
+```{r}
+ggplot2::ggplot(invivo.df,aes(x=median,y=mad)) +
+  geom_point() +
+  geom_smooth(mmethod = "loess") + 
+  labs(title = "Normalized Mad vs Median")
+```
+
+# Count Distributions 
+
+## Unnormalized {.tabset}
+
+### invitro
+```{r}
+invitro.filtered@assays@data$counts %>% melt %>% 
+  ggplot(aes(x=variable, fill=variable, y = value)) + 
+  geom_boxplot() +
+  labs(title = "Sample-specific Distribution") +
+  scale_x_discrete(guide = guide_axis(angle = 45)) 
+```
+
+### invivo 
+```{r}
+invivo.filtered@assays@data$counts %>% melt %>% 
+  ggplot(aes(x=variable, fill=variable, y = value)) + 
+  geom_boxplot() +
+  labs(title = "Sample-specific Distribution") +
+  scale_x_discrete(guide = guide_axis(angle = 45)) 
+```
+
+
+## DESeq Normalized {.tabset}
+
+### invitro
+```{r}
+invitro.filtered@assays@data$rle_log2 %>% melt %>% 
+  ggplot(aes(x=Var2, fill=Var2, y = value)) + 
+  geom_boxplot() +
+  labs(title = "Sample-specific Distribution") +
+  scale_x_discrete(guide = guide_axis(angle = 45)) 
+```
+
+### invivo
+```{r}
+invivo.filtered@assays@data$rle_log2 %>% melt %>% 
+  ggplot(aes(x=Var2, fill=Var2, y = value)) + 
+  geom_boxplot() +
+  labs(title = "Sample-specific Distribution") +
+  scale_x_discrete(guide = guide_axis(angle = 45)) 
+```
+
+
+# Heatmaps {.tabset}
+
+```{r}
+hcopt <- function(d, HC=NULL, method = "ward.D", members = NULL){
+  require("cba")
+  if ( is.null(HC) ) {
+    HC <- hclust(d,method=method,members=members)
+  }
+  #optimal leaf ordering
+  ORD <- cba::order.optimal(d,merge=HC$merge)
+  HC$merge <- ORD$merge
+  HC$order <- ORD$order
+  HC
+}
+```
+
+## invitro 
+```{r}
+## Heatmap for the top 3000
+dat_flt <- 
+  invitro.filtered[order(matrixStats::rowMads(invitro.filtered@assays@data$rle_log2),decreasing = TRUE)[1:3000],]
+## column annotation
+annot <- invitro.filtered@colData %>% data.frame() %>% dplyr::select("Condition")
+rownames(annot) <- colnames(invitro.filtered@assays@data$counts)
+annot_col <- list(Condition=c(miR1453D = "lightblue",
+                              miR1454D = "purple",
+                              miR1513D = "orange",
+                              miR1514D = "cyan",
+                              sc_miRNA3D = "royalblue",
+                              sc_miRNA4D = "gold"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(dat_flt@assays@data$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(dat_flt@assays@data$rle_log2)),method="ward.D")
+
+pheatmap(dat_flt@assays@data$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=hc_col,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         scale = "row")
+```
+
+## invivo (IR/IS/Control)
+```{r}
+## Heatmap for the top 3000
+dat_flt <- invivo.filtered[,1:14]
+dat_flt <- dat_flt[order(matrixStats::rowMads(dat_flt@assays@data$rle_log2),decreasing = TRUE)[1:3000],]
+## column annotation
+annot <- dat_flt@colData %>% data.frame() %>% dplyr::select("Condition")
+rownames(annot) <- colnames(dat_flt@assays@data$counts)
+annot_col <- list(Condition=c(Control="gray",
+                              IR="pink",
+                              IS = "lightgreen"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(dat_flt@assays@data$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(dat_flt@assays@data$rle_log2)),method="ward.D")
+
+pheatmap(dat_flt@assays@data$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=hc_col,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         scale = "row")
+```
+
+## invivo (miRNA145/scRNA)
+```{r}
+## Heatmap for the top 3000
+dat_flt <- invivo.filtered[,15:21]
+dat_flt <- dat_flt[order(matrixStats::rowMads(dat_flt@assays@data$rle_log2),decreasing = TRUE)[1:3000],]
+## column annotation
+annot <- dat_flt@colData %>% data.frame() %>% dplyr::select("Condition")
+rownames(annot) <- colnames(dat_flt@assays@data$counts)
+annot_col <- list(Condition=c(sc_miRNA="gray",
+                              miR_145="pink"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(dat_flt@assays@data$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(dat_flt@assays@data$rle_log2)),method="ward.D")
+
+pheatmap(dat_flt@assays@data$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=hc_col,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         scale = "row")
+```

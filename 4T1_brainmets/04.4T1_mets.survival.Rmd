@@ -1,0 +1,687 @@
+---
+title: "4T1 Mets RNA Seq - Survival Analysis based on GSVA Projections"
+author: "Andrew Chen"
+date:   "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: 'united'
+    toc: true
+    toc_depth: 1
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+```{r}
+library(survminer)
+library(survival)
+library(tidyverse)
+library(DT)
+
+PATH <- file.path(Sys.getenv("MLAB"), "projects/brcameta/exosome/4t1_brca_brain_mets/")
+TCGAPATH <- file.path(Sys.getenv("CBM"),"TCGA-GDC/")
+DPATH <- file.path(Sys.getenv("CBM"),"otherStudies/RNAseq/2022-06-03-DenisExosomeBrCaBrainMets/")
+
+do_save <- TRUE
+```
+
+# Loading Data
+```{r}
+tcga_gsva <- readRDS(file.path(PATH, "data/tcga_gsva_res.rds"))
+metabric_gsva <- readRDS(file.path(PATH, "data/metabric_gsva_res.rds"))
+
+#Signatures
+
+all_sigs <- readRDS(file.path(PATH,"data/signatures_symbol.rds"))
+all_sigs <- all_sigs[lapply(all_sigs, length) > 1]
+
+all_sigs_human <- lapply(all_sigs, babelgene::orthologs, species="mouse", human=FALSE)
+all_sigs_human <- lapply(all_sigs_human, function (x) x %>% dplyr::pull(human_symbol))
+```
+
+Data Filtering
+```{r}
+na_filter <- !is.na(tcga_gsva$vital_status)
+missing_death_day_filter <- !((tcga_gsva$vital_status == "Dead") & is.na(tcga_gsva$days_to_death))
+subtype_filter <- !is.na(tcga_gsva$subtype_selected)
+data_filter <- na_filter & missing_death_day_filter & subtype_filter
+
+tcga_gsva <- tcga_gsva[,data_filter]
+```
+
+> Censoring: If samples are alive, then they lived at least as long as the day to their last followup. For 5 year threshold, those who died after 5 years, should be right-censored, and labeled to have lived at least as long as 'days to death' + 1.
+
+```{r}
+pData(tcga_gsva) <- pData(tcga_gsva) %>% 
+  rownames_to_column("ID") %>% 
+  mutate(time = if_else(!is.na(days_to_death),days_to_death,days_to_last_follow_up)) %>%
+  mutate(time_5 = if_else(as.numeric(time) < 1825.0, as.numeric(time) , 1826.0)) %>%
+  mutate(vital_status_1 = if_else(vital_status == "Alive", 1, 2)) %>%
+  mutate(vital_status_5 = if_else(vital_status == "Dead" & (time_5 > 1825.0), 1, vital_status_1)) %>% 
+  column_to_rownames("ID")
+
+pData(metabric_gsva) <- pData(metabric_gsva) %>% 
+  mutate(time = OS_MONTHS*30.437) %>%
+  mutate(time_5 = if_else(as.numeric(time) < 1825.0, as.numeric(time) , 1826.0)) %>%
+  mutate(vital_status_1 = if_else(OS_STATUS == "LIVING", 1, 2)) %>%
+  mutate(vital_status_5 = if_else(OS_STATUS == "DECEASED" & (time_5 > 1825.0), 1, vital_status_1))
+```
+
+# Survfit All subtypes {.tabset}
+
+```{r}
+tcga_threshold_ir_c <- median(exprs(tcga_gsva["ir_c_up",]) - exprs(tcga_gsva["ir_c_down"]))
+tcga_threshold_is_c <- median(exprs(tcga_gsva["is_c_up",])-exprs(tcga_gsva["is_c_down",]))
+tcga_threshold_ir_is <- median(exprs(tcga_gsva["ir_is_up",])-exprs(tcga_gsva["ir_is_down",]))
+metabric_threshold_ir_c <- median(exprs(metabric_gsva["ir_c_up",]) - exprs(metabric_gsva["ir_c_down"]))
+metabric_threshold_is_c <- median(exprs(metabric_gsva["is_c_up",])-exprs(metabric_gsva["is_c_down",]))
+metabric_threshold_ir_is <- median(exprs(metabric_gsva["ir_is_up",])-exprs(metabric_gsva["ir_is_down",]))
+
+tcga_threshold_ir_c_up <- median(exprs(tcga_gsva["ir_c_up",]))
+tcga_threshold_is_c_up <- median(exprs(tcga_gsva["is_c_up",]))
+tcga_threshold_ir_is_up <- median(exprs(tcga_gsva["ir_is_up",]))
+metabric_threshold_ir_c_up <- median(exprs(metabric_gsva["ir_c_up",]))
+metabric_threshold_is_c_up <- median(exprs(metabric_gsva["is_c_up",]))
+metabric_threshold_ir_is_up <- median(exprs(metabric_gsva["ir_is_up",]))
+```
+
+Adding GSVA data
+```{r}
+tcga_gsva$ir_c <- t(exprs(tcga_gsva["ir_c_up",]) - exprs(tcga_gsva["ir_c_down"]))
+tcga_gsva$is_c <- t(exprs(tcga_gsva["is_c_up",])-exprs(tcga_gsva["is_c_down",]))
+tcga_gsva$ir_is <- t(exprs(tcga_gsva["ir_is_up",])-exprs(tcga_gsva["ir_is_down",]))
+tcga_gsva$ir_c_stat <- with(tcga_gsva, ifelse(tcga_gsva$ir_c <= tcga_threshold_ir_c, "low", "high"))
+tcga_gsva$is_c_stat <- with(tcga_gsva, ifelse(tcga_gsva$is_c <= tcga_threshold_is_c, "low", "high"))
+tcga_gsva$ir_is_stat <- with(tcga_gsva, ifelse(tcga_gsva$ir_is <= tcga_threshold_ir_is, "low", "high"))
+
+tcga_gsva$ir_c_up <- t(exprs(tcga_gsva["ir_c_up",]))
+tcga_gsva$is_c_up <- t(exprs(tcga_gsva["is_c_up",]))
+tcga_gsva$ir_is_up <- t(exprs(tcga_gsva["ir_is_up",]))
+tcga_gsva$ir_c_up_stat <- with(tcga_gsva, ifelse(tcga_gsva$ir_c_up <= tcga_threshold_ir_c_up, "low", "high"))
+tcga_gsva$is_c_up_stat <- with(tcga_gsva, ifelse(tcga_gsva$is_c_up <= tcga_threshold_is_c_up, "low", "high"))
+tcga_gsva$ir_is_up_stat <- with(tcga_gsva, ifelse(tcga_gsva$ir_is_up <= tcga_threshold_ir_is_up, "low", "high"))
+
+metabric_gsva$ir_c <- t(exprs(metabric_gsva["ir_c_up",]) - exprs(metabric_gsva["ir_c_down"]))
+metabric_gsva$is_c <- t(exprs(metabric_gsva["is_c_up",])-exprs(metabric_gsva["is_c_down",]))
+metabric_gsva$ir_is <- t(exprs(metabric_gsva["ir_is_up",])-exprs(metabric_gsva["ir_is_down",]))
+metabric_gsva$ir_c_stat <- with(metabric_gsva, ifelse(metabric_gsva$ir_c <= metabric_threshold_ir_c, "low", "high"))
+metabric_gsva$is_c_stat <- with(metabric_gsva, ifelse(metabric_gsva$is_c <= metabric_threshold_is_c, "low", "high"))
+metabric_gsva$ir_is_stat <- with(metabric_gsva, ifelse(metabric_gsva$ir_is <= metabric_threshold_ir_is, "low", "high"))
+
+metabric_gsva$ir_c_up <- t(exprs(metabric_gsva["ir_c_up",]))
+metabric_gsva$is_c_up <- t(exprs(metabric_gsva["is_c_up",]))
+metabric_gsva$ir_is_up <- t(exprs(metabric_gsva["ir_is_up",]))
+metabric_gsva$ir_c_up_stat <- with(metabric_gsva, ifelse(metabric_gsva$ir_c_up <= metabric_threshold_ir_c_up, "low", "high"))
+metabric_gsva$is_c_up_stat <- with(metabric_gsva, ifelse(metabric_gsva$is_c_up <= metabric_threshold_is_c_up, "low", "high"))
+metabric_gsva$ir_is_up_stat <- with(metabric_gsva, ifelse(metabric_gsva$ir_is_up <= metabric_threshold_ir_is_up, "low", "high"))
+```
+
+## IR_C_UP
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva$time), tcga_gsva$vital_status_1) ~ tcga_gsva$ir_c_up_stat),
+    data = tcga_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva$time_5), tcga_gsva$vital_status_5) ~ tcga_gsva$ir_c_up_stat),
+    data = tcga_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA w/ 5-year threshold')
+```
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva$time), metabric_gsva$vital_status_1) ~ metabric_gsva$ir_c_up_stat),
+    data = metabric_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'METABRIC')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva$time_5), metabric_gsva$vital_status_5) ~ metabric_gsva$ir_c_up_stat),
+    data = metabric_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'METABRIC w/ 5-year threshold')
+```
+
+## IR_C
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva$time), tcga_gsva$vital_status_1) ~ tcga_gsva$ir_c_stat),
+    data = tcga_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva$time_5), tcga_gsva$vital_status_5) ~ tcga_gsva$ir_c_stat),
+    data = tcga_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA w/ 5-year threshold')
+```
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva$time), metabric_gsva$vital_status_1) ~ metabric_gsva$ir_c_stat),
+    data = metabric_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'METABRIC')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva$time_5), metabric_gsva$vital_status_5) ~ metabric_gsva$ir_c_stat),
+    data = metabric_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'METABRIC w/ 5-year threshold')
+```
+
+## IS_C_UP
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva$time), tcga_gsva$vital_status_1) ~ tcga_gsva$is_c_up_stat),
+    data = tcga_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva$time_5), tcga_gsva$vital_status_5) ~ tcga_gsva$is_c_up_stat),
+    data = tcga_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA w/ 5-year threshold')
+```
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva$time), metabric_gsva$vital_status_1) ~ metabric_gsva$is_c_up_stat),
+    data = metabric_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'METABRIC')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva$time_5), metabric_gsva$vital_status_5) ~ metabric_gsva$is_c_up_stat),
+    data = metabric_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'METABRIC w/ 5-year threshold')
+```
+
+## IS_C
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva$time), tcga_gsva$vital_status_1) ~ tcga_gsva$is_c_stat),
+    data = tcga_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva$time_5), tcga_gsva$vital_status_5) ~ tcga_gsva$is_c_stat),
+    data = tcga_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA w/ 5-year threshold')
+```
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva$time), metabric_gsva$vital_status_1) ~ metabric_gsva$is_c_stat),
+    data = metabric_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'METABRIC')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva$time_5), metabric_gsva$vital_status_5) ~ metabric_gsva$is_c_stat),
+    data = metabric_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'METABRIC w/ 5-year threshold')
+```
+
+## IR_IS_UP
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva$time), tcga_gsva$vital_status_1) ~ tcga_gsva$ir_is_up_stat),
+    data = tcga_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva$time_5), tcga_gsva$vital_status_5) ~ tcga_gsva$ir_is_up_stat),
+    data = tcga_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA w/ 5-year threshold')
+```
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva$time), metabric_gsva$vital_status_1) ~ metabric_gsva$ir_is_up_stat),
+    data = metabric_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'METABRIC')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva$time_5), metabric_gsva$vital_status_5) ~ metabric_gsva$ir_is_up_stat),
+    data = metabric_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'METABRIC w/ 5-year threshold')
+```
+
+## IR_IS
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva$time), tcga_gsva$vital_status_1) ~ tcga_gsva$ir_is_stat),
+    data = tcga_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva$time_5), tcga_gsva$vital_status_5) ~ tcga_gsva$ir_is_stat),
+    data = tcga_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA w/ 5-year threshold')
+```
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva$time), metabric_gsva$vital_status_1) ~ metabric_gsva$ir_is_stat),
+    data = metabric_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'METABRIC')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva$time_5), metabric_gsva$vital_status_5) ~ metabric_gsva$ir_is_stat),
+    data = metabric_gsva, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'METABRIC w/ 5-year threshold')
+```
+
+# Survfit Basal {.tabset}
+
+Thresholds
+```{r}
+tcga_basal_filter <- tcga_gsva$subtype_selected == "BRCA.Basal"
+tcga_gsva_basal <- tcga_gsva[,tcga_basal_filter]
+metabric_basal_filter <- metabric_gsva$Pam50_SUBTYPE == "Basal"
+metabric_gsva_basal <- metabric_gsva[,metabric_basal_filter]
+
+tcga_threshold_ir_c <- median(exprs(tcga_gsva_basal["ir_c_up",])-exprs(tcga_gsva_basal["ir_c_down",]))
+tcga_threshold_is_c <- median(exprs(tcga_gsva_basal["is_c_up",])-exprs(tcga_gsva_basal["is_c_down",]))
+tcga_threshold_ir_is <- median(exprs(tcga_gsva_basal["ir_is_up",])-exprs(tcga_gsva_basal["ir_is_down",]))
+metabric_threshold_ir_c <- median(exprs(metabric_gsva_basal["ir_c_up",])-exprs(metabric_gsva_basal["ir_c_down",]))
+metabric_threshold_is_c <- median(exprs(metabric_gsva_basal["is_c_up",])-exprs(metabric_gsva_basal["is_c_down",]))
+metabric_threshold_ir_is <- median(exprs(metabric_gsva_basal["ir_is_up",])-exprs(metabric_gsva_basal["ir_is_down",]))
+
+tcga_threshold_ir_c_up <- median(exprs(tcga_gsva_basal["ir_c_up",]))
+tcga_threshold_is_c_up <- median(exprs(tcga_gsva_basal["is_c_up",]))
+tcga_threshold_ir_is_up <- median(exprs(tcga_gsva_basal["ir_is_up",]))
+metabric_threshold_ir_c_up <- median(exprs(metabric_gsva_basal["ir_c_up",]))
+metabric_threshold_is_c_up <- median(exprs(metabric_gsva_basal["is_c_up",]))
+metabric_threshold_ir_is_up <- median(exprs(metabric_gsva_basal["ir_is_up",]))
+```
+
+Adding GSVA data
+```{r}
+tcga_gsva_basal$ir_c <- t(exprs(tcga_gsva_basal["ir_c_up",])-exprs(tcga_gsva_basal["ir_c_down",]))
+tcga_gsva_basal$is_c <- t(exprs(tcga_gsva_basal["is_c_up",])-exprs(tcga_gsva_basal["is_c_down",]))
+tcga_gsva_basal$ir_is <- t(exprs(tcga_gsva_basal["ir_is_up",])-exprs(tcga_gsva_basal["ir_is_down",]))
+metabric_gsva_basal$ir_c <- t(exprs(metabric_gsva_basal["ir_c_up",])-exprs(metabric_gsva_basal["ir_c_down",]))
+metabric_gsva_basal$is_c <- t(exprs(metabric_gsva_basal["is_c_up",])-exprs(metabric_gsva_basal["is_c_down",]))
+metabric_gsva_basal$ir_is <- t(exprs(metabric_gsva_basal["ir_is_up",])-exprs(metabric_gsva_basal["ir_is_down",]))
+
+tcga_gsva_basal$ir_c_up <- t(exprs(tcga_gsva_basal["ir_c_up",]))
+tcga_gsva_basal$is_c_up <- t(exprs(tcga_gsva_basal["is_c_up",]))
+tcga_gsva_basal$ir_is_up <- t(exprs(tcga_gsva_basal["ir_is_up",]))
+metabric_gsva_basal$ir_c_up <- t(exprs(metabric_gsva_basal["ir_c_up",]))
+metabric_gsva_basal$is_c_up <- t(exprs(metabric_gsva_basal["is_c_up",]))
+metabric_gsva_basal$ir_is_up <- t(exprs(metabric_gsva_basal["ir_is_up",]))
+
+
+
+tcga_gsva_basal$ir_c_stat <- with(tcga_gsva_basal, ifelse(tcga_gsva_basal$ir_c <= tcga_threshold_ir_c, "low", "high"))
+tcga_gsva_basal$is_c_stat <- with(tcga_gsva_basal, ifelse(tcga_gsva_basal$is_c <= tcga_threshold_is_c, "low", "high"))
+tcga_gsva_basal$ir_is_stat <- with(tcga_gsva_basal, ifelse(tcga_gsva_basal$ir_is <= tcga_threshold_ir_is, "low", "high"))
+tcga_gsva_basal$ir_c_up_stat <- with(tcga_gsva_basal, ifelse(tcga_gsva_basal$ir_c_up <= tcga_threshold_ir_c_up, "low", "high"))
+tcga_gsva_basal$is_c_up_stat <- with(tcga_gsva_basal, ifelse(tcga_gsva_basal$is_c_up <= tcga_threshold_is_c_up, "low", "high"))
+tcga_gsva_basal$ir_is_up_stat <- with(tcga_gsva_basal, ifelse(tcga_gsva_basal$ir_is_up <= tcga_threshold_ir_is_up, "low", "high"))
+
+metabric_gsva_basal$ir_c_stat <- with(metabric_gsva_basal, ifelse(metabric_gsva_basal$ir_c <= metabric_threshold_ir_c, "low", "high"))
+metabric_gsva_basal$is_c_stat <- with(metabric_gsva_basal, ifelse(metabric_gsva_basal$is_c <= metabric_threshold_is_c, "low", "high"))
+metabric_gsva_basal$ir_is_stat <- with(metabric_gsva_basal, ifelse(metabric_gsva_basal$ir_is <= metabric_threshold_ir_is, "low", "high"))
+metabric_gsva_basal$ir_c_up_stat <- with(metabric_gsva_basal, ifelse(metabric_gsva_basal$ir_c_up <= metabric_threshold_ir_c_up, "low", "high"))
+metabric_gsva_basal$is_c_up_stat <- with(metabric_gsva_basal, ifelse(metabric_gsva_basal$is_c_up <= metabric_threshold_is_c_up, "low", "high"))
+metabric_gsva_basal$ir_is_up_stat <- with(metabric_gsva_basal, ifelse(metabric_gsva_basal$ir_is_up <= metabric_threshold_ir_is_up, "low", "high"))
+```
+
+## IR_C_UP
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva_basal$time), tcga_gsva_basal$vital_status_1) ~ tcga_gsva_basal$ir_c_up_stat),
+    data = tcga_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva_basal$time_5), tcga_gsva_basal$vital_status_5) ~ tcga_gsva_basal$ir_c_up_stat),
+    data = tcga_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA w/ 5-year threshold')
+```
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva_basal$time), metabric_gsva_basal$vital_status_1) ~ metabric_gsva_basal$ir_c_up_stat),
+    data = metabric_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'Metabric')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva_basal$time_5), metabric_gsva_basal$vital_status_5) ~ metabric_gsva_basal$ir_c_up_stat),
+    data = metabric_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'Metabric w/ 5-year threshold')
+```
+
+## IR_C
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva_basal$time), tcga_gsva_basal$vital_status_1) ~ tcga_gsva_basal$ir_c_stat),
+    data = tcga_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva_basal$time_5), tcga_gsva_basal$vital_status_5) ~ tcga_gsva_basal$ir_c_stat),
+    data = tcga_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA w/ 5-year threshold')
+```
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva_basal$time), metabric_gsva_basal$vital_status_1) ~ metabric_gsva_basal$ir_c_stat),
+    data = metabric_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'Metabric')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva_basal$time_5), metabric_gsva_basal$vital_status_5) ~ metabric_gsva_basal$ir_c_stat),
+    data = metabric_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'Metabric w/ 5-year threshold')
+```
+
+## IS_C_UP
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva_basal$time), tcga_gsva_basal$vital_status_1) ~ tcga_gsva_basal$is_c_up_stat),
+    data = tcga_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva_basal$time_5), tcga_gsva_basal$vital_status_5) ~ tcga_gsva_basal$is_c_up_stat),
+    data = tcga_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'w/ 5-year threshold')
+```
+
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva_basal$time), metabric_gsva_basal$vital_status_1) ~ metabric_gsva_basal$is_c_up_stat),
+    data = metabric_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'Metabric')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva_basal$time_5), metabric_gsva_basal$vital_status_5) ~ metabric_gsva_basal$is_c_up_stat),
+    data = metabric_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'Metabric w/ 5-year threshold')
+```
+
+## IS_C
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva_basal$time), tcga_gsva_basal$vital_status_1) ~ tcga_gsva_basal$is_c_stat),
+    data = tcga_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva_basal$time_5), tcga_gsva_basal$vital_status_5) ~ tcga_gsva_basal$is_c_stat),
+    data = tcga_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'w/ 5-year threshold')
+```
+
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva_basal$time), metabric_gsva_basal$vital_status_1) ~ metabric_gsva_basal$is_c_stat),
+    data = metabric_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'Metabric')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva_basal$time_5), metabric_gsva_basal$vital_status_5) ~ metabric_gsva_basal$is_c_stat),
+    data = metabric_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'Metabric w/ 5-year threshold')
+```
+
+## IR_IS_UP
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva_basal$time), tcga_gsva_basal$vital_status_1) ~ tcga_gsva_basal$ir_is_up_stat),
+    data = tcga_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title='TCGA')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva_basal$time_5), tcga_gsva_basal$vital_status_5) ~ tcga_gsva_basal$ir_is_up_stat),
+    data = tcga_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA w/ 5-year threshold')
+```
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva_basal$time), metabric_gsva_basal$vital_status_1) ~ metabric_gsva_basal$ir_is_up_stat),
+    data = metabric_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'Metabric')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva_basal$time_5), metabric_gsva_basal$vital_status_5) ~ metabric_gsva_basal$ir_is_up_stat),
+    data = metabric_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'Metabric w/ 5-year threshold')
+```
+
+## IR_IS
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva_basal$time), tcga_gsva_basal$vital_status_1) ~ tcga_gsva_basal$ir_is_stat),
+    data = tcga_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title='TCGA')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(tcga_gsva_basal$time_5), tcga_gsva_basal$vital_status_5) ~ tcga_gsva_basal$ir_is_stat),
+    data = tcga_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'TCGA w/ 5-year threshold')
+```
+```{r}
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva_basal$time), metabric_gsva_basal$vital_status_1) ~ metabric_gsva_basal$ir_is_stat),
+    data = metabric_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'Metabric')
+
+ggsurvplot(
+    fit = survfit(Surv(as.numeric(metabric_gsva_basal$time_5), metabric_gsva_basal$vital_status_5) ~ metabric_gsva_basal$ir_is_stat),
+    data = metabric_gsva_basal, 
+    xlab = "Days", 
+    ylab = "Overall survival probability",
+    conf.int = TRUE,
+    pval = TRUE,
+    title = 'Metabric w/ 5-year threshold')
+```
+
+# Cox Proportional Hazard
+
+TCGA
+```{r}
+pData(tcga_gsva)$subtype_selected <- relevel(factor(pData(tcga_gsva)$subtype_selected), "BRCA.Normal")
+tcga.cox1 <- coxph(Surv(as.numeric(time), vital_status_1) ~  subtype_selected , data=pData(tcga_gsva))
+tcga.cox2 <- coxph(Surv(as.numeric(time), vital_status_1) ~  ir_is + subtype_selected , data=pData(tcga_gsva))
+anova(tcga.cox1, tcga.cox2)
+```
+
+```{r}
+summary(tcga.cox2)
+```
+
+
+Metabric
+```{r}
+pData(metabric_gsva)$Pam50_SUBTYPE <- relevel(factor(pData(metabric_gsva)$Pam50_SUBTYPE), "Normal")
+metabric.cox1 <- coxph(Surv(as.numeric(time), vital_status_1) ~  Pam50_SUBTYPE , data=pData(metabric_gsva))
+metabric.cox2 <- coxph(Surv(as.numeric(time), vital_status_1) ~  ir_is + Pam50_SUBTYPE , data=pData(metabric_gsva))
+anova(metabric.cox1, metabric.cox2)
+```
+```{r}
+summary(metabric.cox2)
+```
+

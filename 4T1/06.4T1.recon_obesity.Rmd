@@ -1,0 +1,565 @@
+---
+title: "Recontextualized 4T1 Mets RNA Seq - Association with Obesity"
+author: "Andrew Chen"
+date:   "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: 'united'
+    toc: true
+    toc_depth: 1
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+```{r}
+library(GSVA)
+library(openxlsx)
+library(tidyverse)
+library(Biobase)
+library(ComplexHeatmap)
+library(circlize)
+library(hypeR)
+library(ggbeeswarm)
+
+source(file.path(Sys.getenv("MLAB"), "projects/brcameta/sig_recon/scripts/recontextualize.R"))
+
+PATH <- file.path(Sys.getenv("MLAB"), "projects/brcameta/exosome/4t1_brca")
+TCGAPATH <- file.path(Sys.getenv("CBM"),"TCGA-GDC/")
+METABRICPATH <- file.path(Sys.getenv("CBM"), "METABRIC/")
+DPATH <- file.path(Sys.getenv("CBM"),"otherStudies/RNAseq/2023-03-22-YuhanExosomeBrCa")
+
+do_save <- FALSE
+```
+
+# Loading Data
+```{r}
+tcga_brca <- readRDS(file.path(TCGAPATH,"/esets_filtered/TCGA-BRCA_2020-03-22_DESeq2_log_filtered_eset.rds"))
+
+metabric <- readRDS(file.path(METABRICPATH, "ESets/metabric_GE_ESet.rds"))
+metabric_impute <- readRDS(file.path(METABRICPATH, "ESets/metabric_GE_ESet_impute.rds"))
+```
+
+
+```{r}
+#Signatures
+
+## Obesity signature from Fuentes-Mattei et al., JNCI 2014, Table S3.
+obDiff <- read.xlsx( file.path(PATH,"data/JNCI2014_SupplementaryTable3_ObeseSignatureBrCa.xlsx") ) 
+colnames(obDiff)[match(c("Gene.Title.(Definition)","Log.ratio.(Log10)","p-value*"),colnames(obDiff))] <-
+    c("Gene.Title","Log10.ratio","pvalue")
+obSig <- list(
+    ob.up=dplyr::filter(obDiff,Log10.ratio>0) %>% select(Gene.Symbol) %>% drop_na() %>% distinct() %>% pull(),
+    ob.dn=dplyr::filter(obDiff,Log10.ratio<0) %>% select(Gene.Symbol) %>% drop_na() %>% distinct() %>% pull())
+
+diabetes_sigs <- readRDS(file.path(PATH, "data/diabetes_sigs.rds")) %>% unlist(use.names=TRUE, recursive = FALSE)
+
+## Signatures from RNA-Seq experiments
+all_sigs <- readRDS(file.path(PATH,"data/signatures_symbol.rds"))
+all_sigs <- all_sigs[lapply(all_sigs, length) > 1]
+
+all_sigs_human <- lapply(all_sigs, babelgene::orthologs, species="mouse", human=FALSE)
+all_sigs_human <- lapply(all_sigs_human, function (x) x %>% dplyr::pull(human_symbol))
+
+## Hallmark Signatures
+hallmark_genesets <- msigdb_download(species="Homo sapiens", category="H")
+hallmark_emt <- hallmark_genesets["HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION"]
+```
+
+# Recontextualization
+```{r}
+tcga_brca_net <- readRDS(file.path(Sys.getenv("MLAB"), "projects/brcameta/sig_recon/data/wgcna_networks/unsplit/TCGA-BRCA.rds"))
+
+tcga_brca_rwr <- rwr_df(tcga_brca_net, all_sigs_human, restart = 0.05)
+```
+
+```{r}
+combined_sigs_df <- dplyr::bind_rows(lapply(tcga_brca_rwr, tibble::rownames_to_column, var="gene"), .id="sig")
+
+combined_sigs_df %>% group_by(sig) %>% mutate(p_norm = (prob-min(prob))/(max(prob)-min(prob))) %>% mutate(alpha = if_else(seed, 1, 0.5)) %>%
+  ggplot(aes(x=sig, y=p_norm, color=seed, alpha=alpha)) +
+  geom_quasirandom() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  labs(title="Recontextualizing 4T1 signatures in TCGA BRCA")
+```
+
+```{r}
+# Recontextualized signatures are the same length as the oraiginal signature
+
+all_sigs_length <- lapply(all_sigs_human, length)
+
+recon_sigs <- list()
+for(sig_name in names(all_sigs_length)) {
+  old_sig_length <- all_sigs_length[[sig_name]]
+  new_sig <- tcga_brca_rwr[[sig_name]] %>% slice(1:old_sig_length) %>% rownames
+  recon_sigs[[sig_name]] <- new_sig
+}
+
+saveRDS(recon_sigs, file.path(PATH, "data/recon_sigs.rds"))
+stopifnot(all.equal(lapply(recon_sigs, length),all_sigs_length))
+
+recon_sigs <- c(recon_sigs, obSig, diabetes_sigs, hallmark_emt)
+```
+
+
+# GSVA
+```{r}
+# GSVA
+if (do_save) {
+  tcga_gsva <- gsva(tcga_brca, recon_sigs, mx.diff=TRUE, verbose=FALSE)
+  metabric_gsva <- gsva(metabric, recon_sigs, mx.diff=TRUE, verbose=FALSE)
+  saveRDS(metabric_gsva, file.path(PATH, "data/metabric_gsva_recon.rds"))
+  saveRDS(tcga_gsva, file.path(PATH, "data/tcga_gsva_recon.rds"))  
+} else {
+  tcga_gsva <- readRDS(file.path(PATH, "data/tcga_gsva_recon.rds"))
+  metabric_gsva <- readRDS(file.path(PATH, "data/metabric_gsva_recon.rds"))
+}
+
+tcga_gsva_no_recon <- readRDS(file.path(PATH, "data/tcga_gsva_res_obs.rds"))
+metabric_gsva_no_recon <- readRDS(file.path(PATH, "data/metabric_gsva_res_obs.rds"))
+```
+
+```{r}
+# Subtype filtering
+metabric_gsva <- metabric_gsva[,metabric_gsva$Pam50_SUBTYPE != "NC"]
+subtype_filter <- is.na(tcga_gsva$subtype_selected)
+tcga_gsva <- tcga_gsva[,!subtype_filter]
+
+pData(tcga_gsva) <- pData(tcga_gsva) %>% mutate(pam50subtype = str_split(subtype_selected, pattern="BRCA.", simplify=TRUE)[,2])
+```
+
+
+# TCGA Correlations {.tabset}
+
+## TCGA Heatmap
+```{r}
+sample_col <- hcl.colors(n=nlevels(tcga_gsva$pam50subtype %>% factor))
+names(sample_col) <- levels(tcga_gsva$pam50subtype %>% factor)
+ha.genes <- HeatmapAnnotation(sample_type=tcga_gsva$pam50subtype,
+                              col=list(sample_type=sample_col))
+
+png(file=file.path(PATH, "results/GSVA_tcga_obs_Heatmap.png"))
+gsva_heatmap <- Heatmap(t(scale(t(exprs(tcga_gsva)))),
+        name="Enrichment Score", 
+        col=colorRamp2(c(-3, 0, 3), c("#072448", "white", "#ff6150")),
+        top_annotation=ha.genes, 
+        cluster_rows=TRUE,
+        cluster_columns=TRUE,
+        clustering_distance_rows="euclidean",
+        clustering_method_rows="ward.D",    
+        clustering_distance_columns="euclidean",
+        clustering_method_columns="ward.D", 
+        show_parent_dend_line=TRUE,
+        column_title = "samples",
+        column_dend_height = unit(5, "mm"),
+        row_title="Genesets",
+        row_dend_width = unit(5, "mm"),
+        show_column_names=FALSE,
+        show_row_names=TRUE)
+draw(gsva_heatmap)
+dev.off()
+gsva_heatmap
+```
+
+## TCGA Corplot
+
+```{r}
+library(ggcorrplot)
+gs_cor <- cor(t(exprs(tcga_gsva)))
+gs_cor_no_recon <- cor(t(exprs(tcga_gsva_no_recon)))
+```
+
+```{r}
+ob_cor <- gs_cor[grepl("ob|dz",rownames(gs_cor)),grepl("ob|dz",colnames(gs_cor))]
+
+ggcorrplot(ob_cor, hc.order = FALSE, type = "lower",
+   outline.col = "white",
+   ggtheme = ggplot2::theme_gray,
+   lab=TRUE,
+   lab_size=3,
+   colors = c("#6D9EC1", "white", "#E46726"))
+```
+
+## TCGA Correlation with CREEDS Diabetes
+
+```{r}
+cor_df <- as.data.frame(as.table(gs_cor))
+colnames(cor_df) <- c("GS1", "GS2", "cor")
+
+no_recon_cor_df <- as.data.frame(as.table(gs_cor_no_recon))
+colnames(no_recon_cor_df) <- c("GS1", "GS2", "cor")
+
+no_recon_cor_df$recon <- FALSE
+cor_df$recon <- TRUE
+
+cor_combined_df <- dplyr::bind_rows(no_recon_cor_df, cor_df)
+```
+
+```{r}
+cor_combined_df$GS1 <- str_replace(cor_combined_df$GS1, pattern="dn", replacement = "down")
+cor_combined_df$GS2 <- str_replace(cor_combined_df$GS2, pattern="dn", replacement = "down")
+cor_combined_df %>% 
+  filter(grepl("ir_c|is_c|ir_is", GS1)) %>%
+  filter(grepl("dz", GS2)) %>%
+  separate(col = GS2, into = c("GS2", "direction"), sep = "\\.") %>% 
+  ggplot() + 
+  geom_boxplot(aes(x=GS1, y=cor, fill=direction, linetype=recon)) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+## Exosome Signatures (Up-Down)
+
+```{r}
+n_samples <- dim(tcga_gsva)[[2]]
+tcga_up_down_df <- data.frame(ir_c=double(length = n_samples), 
+                              ir_is=double(length = n_samples),
+                              is_c=double(length = n_samples),
+                              tgfb_c=double(length = n_samples),
+                              ob=double(length = n_samples),
+                              dz581=double(length = n_samples),
+                              dz882=double(length = n_samples),
+                              dz895=double(length = n_samples),
+                              dz274=double(length = n_samples),
+                              dz9=double(length = n_samples),
+                              dz893=double(length = n_samples),
+                              emt=double(length = n_samples))
+
+tcga_up_down_df$ir_c <- t(exprs(tcga_gsva["ir_c_up",]) - exprs(tcga_gsva["ir_c_down"])) %>% as.numeric
+tcga_up_down_df$tgfb_c <- t(exprs(tcga_gsva["tgfb_c_up",]) - exprs(tcga_gsva["tgfb_c_down"])) %>% as.numeric
+tcga_up_down_df$is_c <- t(exprs(tcga_gsva["is_c_up",])-exprs(tcga_gsva["is_c_down",])) %>% as.numeric
+tcga_up_down_df$ir_is <- t(exprs(tcga_gsva["ir_is_up",])-exprs(tcga_gsva["ir_is_down",])) %>% as.numeric
+tcga_up_down_df$ob <- t(exprs(tcga_gsva["ob.up",])-exprs(tcga_gsva["ob.dn",])) %>% as.numeric
+tcga_up_down_df$dz581 <- t(exprs(tcga_gsva["dz:581.up",])-exprs(tcga_gsva["dz:581.down",])) %>% as.numeric
+tcga_up_down_df$dz882 <- t(exprs(tcga_gsva["dz:882.up",])-exprs(tcga_gsva["dz:882.down",])) %>% as.numeric
+tcga_up_down_df$dz895 <- t(exprs(tcga_gsva["dz:895.up",])-exprs(tcga_gsva["dz:895.down",])) %>% as.numeric
+tcga_up_down_df$dz274 <- t(exprs(tcga_gsva["dz:274.up",])-exprs(tcga_gsva["dz:274.down",])) %>% as.numeric
+tcga_up_down_df$dz9 <- t(exprs(tcga_gsva["dz:9.up",])-exprs(tcga_gsva["dz:9.down",])) %>% as.numeric
+tcga_up_down_df$dz893 <- t(exprs(tcga_gsva["dz:893.up",])-exprs(tcga_gsva["dz:893.down",])) %>% as.numeric
+tcga_up_down_df$emt <- t(exprs(tcga_gsva["HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION",])) %>% as.numeric
+```
+
+
+```{r}
+n_samples <- dim(tcga_gsva_no_recon)[[2]]
+tcga_up_down_no_recon_df <- data.frame(ir_c=double(length = n_samples), 
+                                        ir_is=double(length = n_samples),
+                                        is_c=double(length = n_samples),
+                                        tgfb_c=double(length = n_samples),
+                                        ob=double(length = n_samples),
+                                        dz581=double(length = n_samples),
+                                        dz882=double(length = n_samples),
+                                        dz895=double(length = n_samples),
+                                        dz274=double(length = n_samples),
+                                        dz9=double(length = n_samples),
+                                        dz893=double(length = n_samples),
+                                        emt=double(length = n_samples))
+
+tcga_up_down_no_recon_df$ir_c <- t(exprs(tcga_gsva_no_recon["ir_c_up",]) - exprs(tcga_gsva_no_recon["ir_c_down"])) %>% as.numeric
+tcga_up_down_no_recon_df$tgfb_c <- t(exprs(tcga_gsva_no_recon["tgfb_c_up",]) - exprs(tcga_gsva_no_recon["tgfb_c_down"])) %>% as.numeric
+tcga_up_down_no_recon_df$is_c <- t(exprs(tcga_gsva_no_recon["is_c_up",])-exprs(tcga_gsva_no_recon["is_c_down",])) %>% as.numeric
+tcga_up_down_no_recon_df$ir_is <- t(exprs(tcga_gsva_no_recon["ir_is_up",])-exprs(tcga_gsva_no_recon["ir_is_down",])) %>% as.numeric
+tcga_up_down_no_recon_df$ob <- t(exprs(tcga_gsva_no_recon["ob.up",])-exprs(tcga_gsva_no_recon["ob.dn",])) %>% as.numeric
+tcga_up_down_no_recon_df$dz581 <- t(exprs(tcga_gsva_no_recon["dz:581.up",])-exprs(tcga_gsva_no_recon["dz:581.down",])) %>% as.numeric
+tcga_up_down_no_recon_df$dz882 <- t(exprs(tcga_gsva_no_recon["dz:882.up",])-exprs(tcga_gsva_no_recon["dz:882.down",])) %>% as.numeric
+tcga_up_down_no_recon_df$dz895 <- t(exprs(tcga_gsva_no_recon["dz:895.up",])-exprs(tcga_gsva_no_recon["dz:895.down",])) %>% as.numeric
+tcga_up_down_no_recon_df$dz274 <- t(exprs(tcga_gsva_no_recon["dz:274.up",])-exprs(tcga_gsva_no_recon["dz:274.down",])) %>% as.numeric
+tcga_up_down_no_recon_df$dz9 <- t(exprs(tcga_gsva_no_recon["dz:9.up",])-exprs(tcga_gsva_no_recon["dz:9.down",])) %>% as.numeric
+tcga_up_down_no_recon_df$dz893 <- t(exprs(tcga_gsva_no_recon["dz:893.up",])-exprs(tcga_gsva_no_recon["dz:893.down",])) %>% as.numeric
+tcga_up_down_no_recon_df$emt <- t(exprs(tcga_gsva_no_recon["HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION",])) %>% as.numeric
+```
+
+```{r}
+tcga_up_down_cor <- cor(tcga_up_down_df)
+tcga_up_down_no_recon_cor <- cor(tcga_up_down_no_recon_df)
+```
+
+```{r}
+cor_df <- as.data.frame(as.table(tcga_up_down_cor))
+colnames(cor_df) <- c("GS1", "GS2", "cor")
+
+no_recon_cor_df <- as.data.frame(as.table(tcga_up_down_no_recon_cor))
+colnames(no_recon_cor_df) <- c("GS1", "GS2", "cor")
+
+no_recon_cor_df$recon <- FALSE
+cor_df$recon <- TRUE
+
+cor_combined_df <- dplyr::bind_rows(no_recon_cor_df, cor_df)
+```
+
+### IR-IS
+```{r}
+cor_combined_df %>% 
+  filter(grepl("ir_is|ir_c", GS1)) %>%
+  filter(grepl("dz", GS2)) %>%
+  ggplot() + 
+  geom_boxplot(aes(x=GS1, y=cor, fill=recon)) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+### TGFB-EMT
+```{r}
+cor_combined_df %>% 
+  filter(grepl("tgfb", GS1)) %>%
+  filter(grepl("emt", GS2)) %>%
+  ggplot(aes(x=GS1, y=cor, fill=recon)) + 
+  geom_bar(stat='identity', position='dodge') + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+# Metabric Correlations {.tabset}
+
+## Metabric Heatmap
+```{r}
+sample_col <- hcl.colors(n=nlevels(metabric_gsva$Pam50_SUBTYPE %>% factor))
+names(sample_col) <- levels(metabric_gsva$Pam50_SUBTYPE %>% factor)
+ha.genes <- HeatmapAnnotation(sample_type=metabric_gsva$Pam50_SUBTYPE,
+                              col=list(sample_type=sample_col))
+
+png(file=file.path(PATH, "results/GSVA_metabric_obs_Heatmap.png"))
+gsva_heatmap <- Heatmap(t(scale(t(exprs(metabric_gsva)))),
+        name="Enrichment Score", 
+        col=colorRamp2(c(-3, 0, 3), c("#072448", "white", "#ff6150")),
+        top_annotation=ha.genes, 
+        cluster_rows=TRUE,
+        cluster_columns=TRUE,
+        clustering_distance_rows="euclidean",
+        clustering_method_rows="ward.D",    
+        clustering_distance_columns="euclidean",
+        clustering_method_columns="ward.D", 
+        show_parent_dend_line=TRUE,
+        column_title = "samples",
+        column_dend_height = unit(5, "mm"),
+        row_title="Genesets",
+        row_dend_width = unit(5, "mm"),
+        show_column_names=FALSE,
+        show_row_names=TRUE)
+draw(gsva_heatmap)
+dev.off()
+gsva_heatmap
+```
+
+## Metabric Corplot
+```{r}
+gs_cor <- cor(t(exprs(metabric_gsva)))
+gs_cor_no_recon <- cor(t(exprs(metabric_gsva_no_recon)))
+
+ob_cor <- gs_cor[grepl("ob|dz",rownames(gs_cor)),grepl("ob|dz",colnames(gs_cor))]
+
+ggcorrplot(ob_cor, hc.order = FALSE, type = "lower",
+   outline.col = "white",
+   ggtheme = ggplot2::theme_gray,
+   lab=TRUE,
+   lab_size=3,
+   colors = c("#6D9EC1", "white", "#E46726"))
+```
+
+## Metabric Correlation with CREEDS Diabetes
+
+```{r}
+cor_df <- as.data.frame(as.table(gs_cor))
+colnames(cor_df) <- c("GS1", "GS2", "cor")
+
+no_recon_cor_df <- as.data.frame(as.table(gs_cor_no_recon))
+colnames(no_recon_cor_df) <- c("GS1", "GS2", "cor")
+
+no_recon_cor_df$recon <- FALSE
+cor_df$recon <- TRUE
+
+cor_combined_df <- dplyr::bind_rows(no_recon_cor_df, cor_df)
+```
+
+```{r}
+cor_combined_df$GS1 <- str_replace(cor_combined_df$GS1, pattern="dn", replacement = "down")
+cor_combined_df$GS2 <- str_replace(cor_combined_df$GS2, pattern="dn", replacement = "down")
+cor_combined_df %>% 
+  filter(grepl("ir_c|is_c|ir_is", GS1)) %>%
+  filter(grepl("dz", GS2)) %>%
+  separate(col = GS2, into = c("GS2", "direction"), sep = "\\.") %>% 
+  ggplot() + 
+  geom_boxplot(aes(x=GS1, y=cor, fill=direction, linetype=recon)) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+## Exosome Signatures (Up-Down)
+
+```{r}
+n_samples <- dim(metabric_gsva)[[2]]
+metabric_up_down_df <- data.frame(ir_c=double(length = n_samples), 
+                              ir_is=double(length = n_samples),
+                              is_c=double(length = n_samples),
+                              tgfb_c=double(length = n_samples),
+                              ob=double(length = n_samples),
+                              dz581=double(length = n_samples),
+                              dz882=double(length = n_samples),
+                              dz895=double(length = n_samples),
+                              dz274=double(length = n_samples),
+                              dz9=double(length = n_samples),
+                              dz893=double(length = n_samples),
+                              emt=double(length = n_samples))
+
+metabric_up_down_df$ir_c <- t(exprs(metabric_gsva["ir_c_up",]) - exprs(metabric_gsva["ir_c_down"])) %>% as.numeric
+metabric_up_down_df$tgfb_c <- t(exprs(metabric_gsva["tgfb_c_up",]) - exprs(metabric_gsva["tgfb_c_down"])) %>% as.numeric
+metabric_up_down_df$is_c <- t(exprs(metabric_gsva["is_c_up",])-exprs(metabric_gsva["is_c_down",])) %>% as.numeric
+metabric_up_down_df$ir_is <- t(exprs(metabric_gsva["ir_is_up",])-exprs(metabric_gsva["ir_is_down",])) %>% as.numeric
+metabric_up_down_df$ob <- t(exprs(metabric_gsva["ob.up",])-exprs(metabric_gsva["ob.dn",])) %>% as.numeric
+metabric_up_down_df$dz581 <- t(exprs(metabric_gsva["dz:581.up",])-exprs(metabric_gsva["dz:581.down",])) %>% as.numeric
+metabric_up_down_df$dz882 <- t(exprs(metabric_gsva["dz:882.up",])-exprs(metabric_gsva["dz:882.down",])) %>% as.numeric
+metabric_up_down_df$dz895 <- t(exprs(metabric_gsva["dz:895.up",])-exprs(metabric_gsva["dz:895.down",])) %>% as.numeric
+metabric_up_down_df$dz274 <- t(exprs(metabric_gsva["dz:274.up",])-exprs(metabric_gsva["dz:274.down",])) %>% as.numeric
+metabric_up_down_df$dz9 <- t(exprs(metabric_gsva["dz:9.up",])-exprs(metabric_gsva["dz:9.down",])) %>% as.numeric
+metabric_up_down_df$dz893 <- t(exprs(metabric_gsva["dz:893.up",])-exprs(metabric_gsva["dz:893.down",])) %>% as.numeric
+metabric_up_down_df$emt <- t(exprs(metabric_gsva["HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION",])) %>% as.numeric
+```
+
+
+```{r}
+n_samples <- dim(metabric_gsva_no_recon)[[2]]
+metabric_up_down_no_recon_df <- data.frame(ir_c=double(length = n_samples), 
+                                        ir_is=double(length = n_samples),
+                                        is_c=double(length = n_samples),
+                                        tgfb_c=double(length = n_samples),
+                                        ob=double(length = n_samples),
+                                        dz581=double(length = n_samples),
+                                        dz882=double(length = n_samples),
+                                        dz895=double(length = n_samples),
+                                        dz274=double(length = n_samples),
+                                        dz9=double(length = n_samples),
+                                        dz893=double(length = n_samples),
+                                        emt=double(length = n_samples))
+
+metabric_up_down_no_recon_df$ir_c <- t(exprs(metabric_gsva_no_recon["ir_c_up",]) - exprs(metabric_gsva_no_recon["ir_c_down"])) %>% as.numeric
+metabric_up_down_no_recon_df$tgfb_c <- t(exprs(metabric_gsva_no_recon["tgfb_c_up",]) - exprs(metabric_gsva_no_recon["tgfb_c_down"])) %>% as.numeric
+metabric_up_down_no_recon_df$is_c <- t(exprs(metabric_gsva_no_recon["is_c_up",])-exprs(metabric_gsva_no_recon["is_c_down",])) %>% as.numeric
+metabric_up_down_no_recon_df$ir_is <- t(exprs(metabric_gsva_no_recon["ir_is_up",])-exprs(metabric_gsva_no_recon["ir_is_down",])) %>% as.numeric
+metabric_up_down_no_recon_df$ob <- t(exprs(metabric_gsva_no_recon["ob.up",])-exprs(metabric_gsva_no_recon["ob.dn",])) %>% as.numeric
+metabric_up_down_no_recon_df$dz581 <- t(exprs(metabric_gsva_no_recon["dz:581.up",])-exprs(metabric_gsva_no_recon["dz:581.down",])) %>% as.numeric
+metabric_up_down_no_recon_df$dz882 <- t(exprs(metabric_gsva_no_recon["dz:882.up",])-exprs(metabric_gsva_no_recon["dz:882.down",])) %>% as.numeric
+metabric_up_down_no_recon_df$dz895 <- t(exprs(metabric_gsva_no_recon["dz:895.up",])-exprs(metabric_gsva_no_recon["dz:895.down",])) %>% as.numeric
+metabric_up_down_no_recon_df$dz274 <- t(exprs(metabric_gsva_no_recon["dz:274.up",])-exprs(metabric_gsva_no_recon["dz:274.down",])) %>% as.numeric
+metabric_up_down_no_recon_df$dz9 <- t(exprs(metabric_gsva_no_recon["dz:9.up",])-exprs(metabric_gsva_no_recon["dz:9.down",])) %>% as.numeric
+metabric_up_down_no_recon_df$dz893 <- t(exprs(metabric_gsva_no_recon["dz:893.up",])-exprs(metabric_gsva_no_recon["dz:893.down",])) %>% as.numeric
+metabric_up_down_no_recon_df$emt <- t(exprs(metabric_gsva_no_recon["HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION",])) %>% as.numeric
+```
+
+```{r}
+metabric_up_down_cor <- cor(metabric_up_down_df)
+metabric_up_down_no_recon_cor <- cor(metabric_up_down_no_recon_df)
+```
+
+```{r}
+cor_df <- as.data.frame(as.table(metabric_up_down_cor))
+colnames(cor_df) <- c("GS1", "GS2", "cor")
+
+no_recon_cor_df <- as.data.frame(as.table(metabric_up_down_no_recon_cor))
+colnames(no_recon_cor_df) <- c("GS1", "GS2", "cor")
+
+no_recon_cor_df$recon <- FALSE
+cor_df$recon <- TRUE
+
+cor_combined_df <- dplyr::bind_rows(no_recon_cor_df, cor_df)
+```
+
+### IR-IS
+```{r}
+cor_combined_df %>% 
+  filter(grepl("ir_is|ir_c", GS1)) %>%
+  filter(grepl("dz", GS2)) %>%
+  ggplot() + 
+  geom_boxplot(aes(x=GS1, y=cor, fill=recon)) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+### TGFB-EMT
+```{r}
+cor_combined_df %>% 
+  filter(grepl("tgfb", GS1)) %>%
+  filter(grepl("emt", GS2)) %>%
+  ggplot(aes(x=GS1, y=cor, fill=recon)) + 
+  geom_bar(stat='identity', position='dodge') + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+# KS-based enrichment {.tabset}
+```{r}
+## Add gene symbols to DESeq tables
+dat <- readRDS(file.path(PATH, "data/4T1_mets_sExp.rds"))
+deseq_list <- readRDS(file.path(PATH,"data/deseq_list.rds"))
+hallmark_genesets <- msigdb_download(species="Mus musculus", category="H")
+hallmark_genesets$OBESITY <- obSig
+
+deseq_list <- lapply(deseq_list, function(Z) {
+  as.data.frame(Z) %>% 
+    tibble::rownames_to_column(var="ensembl_id") %>%
+    dplyr::mutate(geneID=unlist(rowData(dat)[ensembl_id,"mgi_symbol"]))
+  })
+```
+
+```{r}
+## rank by up-regulation
+rank_signatures_up <- lapply(
+  deseq_list, function(sig) sig %>% 
+    dplyr::filter(geneID!="") %>%
+    dplyr::arrange(desc(log2FoldChange)) %>%
+    dplyr::select(geneID,log2FoldChange) %>%
+    tibble::deframe())
+names(rank_signatures_up) <- paste(names(rank_signatures_up),"up",sep="_")
+
+## rank by down-regulation
+rank_signatures_dn <- lapply(
+  deseq_list,function(sig) sig %>% 
+    dplyr::filter(geneID!="") %>%
+    dplyr::arrange(log2FoldChange) %>%
+    dplyr::select(geneID,log2FoldChange) %>%
+    tibble::deframe())
+names(rank_signatures_dn) <- paste(names(rank_signatures_dn),"dn",sep="_")
+
+rank_signatures <- c(rank_signatures_up,rank_signatures_dn)
+rank_signatures <- rank_signatures[order(names(rank_signatures),decreasing = TRUE)]
+```
+
+### Hallmarks + Pamm
+
+```{r}
+#all_genesets <- c(hallmark_genesets, pamm_genelists)
+max_fdr <- 0.05
+ks_hall <- hypeR::hypeR(signature=rank_signatures,genesets=hallmark_genesets,test="ks",fdr=max_fdr,plotting=TRUE)
+hyp_dots(ks_hall,merge=TRUE,fdr=max_fdr/5,top=25) + ggtitle(paste("FDR ≤", max_fdr/5))
+```
+
+```{r}
+#hypeR::rctbl_build(ks_hall, show_hmaps=FALSE)
+```
+
+## IS C UP
+```{r}
+print(ks_hall$data$is_c_up$plots[ks_hall$data$is_c_up$data$fdr<=0.01])
+```
+
+## IS C Down
+```{r}
+print(ks_hall$data$is_c_dn$plots[ks_hall$data$is_c_dn$data$fdr<=0.01])
+```
+
+## IR IS Up
+```{r}
+print(ks_hall$data$ir_is_up$plots[ks_hall$data$ir_is_up$data$fdr<=0.01])
+```
+
+## IR IS Down
+```{r}
+print(ks_hall$data$ir_is_dn$plots[ks_hall$data$ir_is_dn$data$fdr<=0.01])
+```
+
+## IR C Up
+```{r}
+print(ks_hall$data$ir_c_up$plots[ks_hall$data$ir_c_up$data$fdr<=0.01])
+```
+
+## IR C Down
+```{r}
+print(ks_hall$data$ir_c_dn$plots[ks_hall$data$ir_c_dn$data$fdr<=0.01])
+```

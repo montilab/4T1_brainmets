@@ -1,0 +1,650 @@
+---
+title: "Yuhan Primary Tumor RNA Seq - DESeq"
+author: "Andrew Chen"
+date:   "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: 'united'
+    toc: true
+    toc_depth: 1
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+```{r}
+library(Biobase)
+library(SummarizedExperiment)
+library(tidyverse)
+library(ggplot2)
+library(DESeq2)
+library(reactable)
+library(cba)
+library(pheatmap)
+library(vennr)
+library(EnsDb.Hsapiens.v86)
+library(AnnotationDbi)
+library(EnsDb.Mmusculus.v79)
+library(ggrepel)
+
+PATH <- file.path(Sys.getenv("MLAB"),"projects/brcameta/projects/exosome/4t1_primary_tumor/")
+DPATH <- file.path(Sys.getenv("CBM"),"otherStudies/RNAseq/")
+```
+
+# Load Data
+```{r}
+invitro.filtered <- readRDS(file.path(PATH,"data/yuhan_invitro.rds"))
+invivo.filtered <- readRDS(file.path(PATH,"data/yuhan_invivo.rds"))
+
+invivo_ir_is <- invivo.filtered[, 1:14]
+invivo_mirna <- invivo.filtered[, 15:21]
+```
+
+# DESeq Result Tables {.tabset}
+
+> DESeq2 performs an internal normalization where geometric mean is calculated for each gene across all samples. The counts for a gene in each sample is then divided by this mean. The median of these ratios in a sample is the size factor for that sample. This procedure corrects for library size and RNA composition bias, which can arise for example when only a small number of genes are very highly expressed in one experiment condition but not in the other. 
+
+```{r}
+invitro_dds <- DESeq2::DESeqDataSetFromMatrix(countData=round(invitro.filtered@assays@data$counts),
+                                      colData=invitro.filtered@colData,
+                                      design=~Condition)
+invitro_dds <- estimateSizeFactors(invitro_dds)
+invitro_dds$Condition <- relevel(invitro_dds$Condition, ref = "sc_miRNA4D")
+
+invivo_iris_dds <- DESeq2::DESeqDataSetFromMatrix(countData=round(invivo_ir_is@assays@data$counts),
+                                      colData=invivo_ir_is@colData,
+                                      design=~Condition)
+invivo_iris_dds <- estimateSizeFactors(invivo_iris_dds)
+invivo_iris_dds$Condition <- relevel(invivo_iris_dds$Condition, ref = "Control")
+
+invivo_mirna_dds <- DESeq2::DESeqDataSetFromMatrix(countData=round(invivo_mirna@assays@data$counts),
+                                      colData=invivo_mirna@colData,
+                                      design=~Condition)
+invivo_mirna_dds <- estimateSizeFactors(invivo_mirna_dds)
+invivo_mirna_dds$Condition <- relevel(invivo_mirna_dds$Condition, ref = "sc_miRNA")
+```
+
+> DESeq2 fits negative binomial generalized linear models for each gene and uses the Wald test for significance testing. Results were filtered so that only genes that had a |log fold change| > X and adjusted p-value < 0.05 (FDR) were retained.
+
+```{r}
+invitro_dds <- DESeq(invitro_dds)
+invivo_iris_dds <- DESeq(invivo_iris_dds)
+invivo_mirna_dds <- DESeq(invivo_mirna_dds)
+```
+
+## Invitro miR1514/scmiRNA
+
+Summary of Different comparisons
+```{r}
+lfcs <- seq(0,1.0,0.1)
+comp_df <- data.frame(lfcs = lfcs)
+for (i in seq_along(lfcs)) {
+  lfc <- lfcs[i]
+  dds_res <- results(invitro_dds, alpha=0.05, lfcThreshold = lfc, contrast=c("Condition", "miR1514D", "sc_miRNA4D"))
+  nPos <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange > lfc), na.rm=TRUE) 
+  nNeg <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange < -lfc), na.rm=TRUE) 
+  comp_df$nPos[i] = nPos
+  comp_df$nNeg[i] = nNeg
+}
+
+comp_df
+```
+
+
+```{r}
+dds_mir1514_scmiRNA_res <- results(invitro_dds, alpha=0.05, lfcThreshold = 0.1, contrast=c("Condition", "miR1514D", "sc_miRNA4D"))
+dds_mir1514_scmiRNA_res_df <- dds_mir1514_scmiRNA_res[which(with(dds_mir1514_scmiRNA_res, padj<0.05)),] %>% as.data.frame
+dds_mir1514_scmiRNA_res_df <- dds_mir1514_scmiRNA_res_df %>% dplyr::arrange(desc(log2FoldChange), padj)
+symbols <- mapIds(EnsDb.Mmusculus.v79,
+                  keys=rownames(dds_mir1514_scmiRNA_res_df),
+                  column="SYMBOL",
+                  keytype="GENEID")
+dds_mir1514_scmiRNA_res_df$symbol <- symbols
+write.csv(dds_mir1514_scmiRNA_res_df, file=file.path(PATH, "data/dds_invitro_mir1514D_scrna4D_diffanal.csv"), row.names = TRUE)
+```
+
+Table of Results
+```{r}
+reactable(dds_mir1514_scmiRNA_res_df, searchable = TRUE, filterable = TRUE)
+```
+
+## Invitro miR1454D/scmiRNA
+
+Summary of Different comparisons
+```{r}
+lfcs <- seq(0,1.0,0.1)
+comp_df <- data.frame(lfcs = lfcs)
+for (i in seq_along(lfcs)) {
+  lfc <- lfcs[i]
+  dds_res <- results(invitro_dds, alpha=0.05, lfcThreshold = lfc, contrast=c("Condition", "miR1454D", "sc_miRNA4D"))
+  nPos <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange > lfc), na.rm=TRUE) 
+  nNeg <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange < -lfc), na.rm=TRUE) 
+  comp_df$nPos[i] = nPos
+  comp_df$nNeg[i] = nNeg
+}
+
+comp_df
+```
+
+
+```{r}
+dds_mir1454_scmiRNA_res <- results(invitro_dds, alpha=0.05, lfcThreshold = 0.1, contrast=c("Condition", "miR1454D", "sc_miRNA4D"))
+dds_mir1454_scmiRNA_res_df <- dds_mir1454_scmiRNA_res[which(with(dds_mir1454_scmiRNA_res, padj<0.05)),] %>% as.data.frame
+dds_mir1454_scmiRNA_res_df <- dds_mir1454_scmiRNA_res_df %>% dplyr::arrange(desc(log2FoldChange), padj)
+symbols <- mapIds(EnsDb.Mmusculus.v79,
+                  keys=rownames(dds_mir1454_scmiRNA_res_df),
+                  column="SYMBOL",
+                  keytype="GENEID")
+dds_mir1454_scmiRNA_res_df$symbol <- symbols
+write.csv(dds_mir1454_scmiRNA_res_df, file=file.path(PATH, "data/dds_invitro_mir1454D_scrna4D_diffanal.csv"), row.names = TRUE)
+```
+
+Table of Results
+```{r}
+reactable(dds_mir1454_scmiRNA_res_df, searchable = TRUE, filterable = TRUE)
+```
+
+## Invitro scmiRNA3D/scmiRNA4D
+
+Summary of Different comparisons
+```{r}
+lfcs <- seq(0,1.0,0.1)
+comp_df <- data.frame(lfcs = lfcs)
+for (i in seq_along(lfcs)) {
+  lfc <- lfcs[i]
+  dds_res <- results(invitro_dds, alpha=0.05, lfcThreshold = lfc, contrast=c("Condition", "sc_miRNA3D", "sc_miRNA4D"))
+  nPos <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange > lfc), na.rm=TRUE) 
+  nNeg <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange < -lfc), na.rm=TRUE) 
+  comp_df$nPos[i] = nPos
+  comp_df$nNeg[i] = nNeg
+}
+
+comp_df
+```
+
+
+```{r}
+dds_3D_scmiRNA4D_res <- results(invitro_dds, alpha=0.05, lfcThreshold = 0.1, contrast=c("Condition", "sc_miRNA3D", "sc_miRNA4D"))
+dds_3D_scmiRNA4D_res_df <- dds_3D_scmiRNA4D_res[which(with(dds_3D_scmiRNA4D_res, padj<0.05)),] %>% as.data.frame
+dds_3D_scmiRNA4D_res_df <- dds_3D_scmiRNA4D_res_df %>% dplyr::arrange(desc(log2FoldChange), padj)
+symbols <- mapIds(EnsDb.Mmusculus.v79,
+                  keys=rownames(dds_3D_scmiRNA4D_res_df),
+                  column="SYMBOL",
+                  keytype="GENEID")
+dds_3D_scmiRNA4D_res_df$symbol <- symbols
+write.csv(dds_3D_scmiRNA4D_res_df, file=file.path(PATH, "data/dds_invitro_scrna3D_scrna4D_diffanal.csv"), row.names = TRUE)
+```
+
+Table of Results
+```{r}
+reactable(dds_3D_scmiRNA4D_res_df, searchable = TRUE, filterable = TRUE)
+```
+
+## Invitro miR1453D/miR1454D
+
+```{r}
+invitro_dds2 <- DESeq2::DESeqDataSetFromMatrix(countData=round(invitro.filtered@assays@data$counts),
+                                      colData=invitro.filtered@colData,
+                                      design=~Condition)
+invitro_dds2 <- estimateSizeFactors(invitro_dds2)
+invitro_dds2$Condition <- relevel(invitro_dds2$Condition, ref = "miR1454D")
+invitro_dds2 <- DESeq(invitro_dds2)
+```
+
+Summary of Different comparisons
+```{r}
+lfcs <- seq(0,1.0,0.1)
+comp_df <- data.frame(lfcs = lfcs)
+for (i in seq_along(lfcs)) {
+  lfc <- lfcs[i]
+  dds_res <- results(invitro_dds2, alpha=0.05, lfcThreshold = lfc, contrast=c("Condition", "miR1453D", "miR1454D"))
+  nPos <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange > lfc), na.rm=TRUE) 
+  nNeg <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange < -lfc), na.rm=TRUE) 
+  comp_df$nPos[i] = nPos
+  comp_df$nNeg[i] = nNeg
+}
+
+comp_df
+```
+
+
+```{r}
+dds_mir1453_1454 <- results(invitro_dds2, alpha=0.05, lfcThreshold = 0.3, contrast=c("Condition", "miR1453D", "miR1454D"))
+dds_mir1453_1454_df <- dds_mir1453_1454[which(with(dds_mir1453_1454, padj<0.05)),] %>% as.data.frame
+dds_mir1453_1454_df <- dds_mir1453_1454_df %>% dplyr::arrange(desc(log2FoldChange), padj)
+symbols <- mapIds(EnsDb.Mmusculus.v79,
+                  keys=rownames(dds_mir1453_1454_df),
+                  column="SYMBOL",
+                  keytype="GENEID")
+dds_mir1453_1454_df$symbol <- symbols
+write.csv(dds_mir1453_1454_df, file=file.path(PATH, "data/dds_invitro_mir1453_1454_diffanal.csv"), row.names = TRUE)
+```
+
+Table of Results
+```{r}
+reactable(dds_mir1453_1454_df, searchable = TRUE, filterable = TRUE)
+```
+
+
+## Invivo miRNA
+
+Summary of Different comparisons
+```{r}
+lfcs <- seq(0,1.0,0.1)
+comp_df <- data.frame(lfcs = lfcs)
+for (i in seq_along(lfcs)) {
+  lfc <- lfcs[i]
+  dds_res <- results(invivo_mirna_dds, alpha=0.05, lfcThreshold = lfc, contrast=c("Condition", "miR_145", "sc_miRNA"))
+  nPos <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange > lfc), na.rm=TRUE) 
+  nNeg <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange < -lfc), na.rm=TRUE) 
+  comp_df$nPos[i] = nPos
+  comp_df$nNeg[i] = nNeg
+}
+
+comp_df
+```
+
+
+```{r}
+dds_mir145_scmiRNA_res <- results(invivo_mirna_dds, alpha=0.05, lfcThreshold = 0, contrast=c("Condition", "miR_145", "sc_miRNA"))
+dds_mir145_scmiRNA_res_df <- dds_mir145_scmiRNA_res[which(with(dds_mir145_scmiRNA_res, padj<0.05)),] %>% as.data.frame
+dds_mir145_scmiRNA_res_df <- dds_mir145_scmiRNA_res_df %>% dplyr::arrange(desc(log2FoldChange), padj)
+symbols <- mapIds(EnsDb.Mmusculus.v79,
+                  keys=rownames(dds_mir145_scmiRNA_res_df),
+                  column="SYMBOL",
+                  keytype="GENEID")
+dds_mir145_scmiRNA_res_df$symbol <- symbols
+write.csv(dds_mir145_scmiRNA_res_df, file=file.path(PATH, "data/dds_invivo_mir145_scrna_diffanal.csv"), row.names = TRUE)
+```
+
+Table of Results
+```{r}
+reactable(dds_mir145_scmiRNA_res_df, searchable = TRUE, filterable = TRUE)
+```
+
+## Invivo IR/Control
+
+Summary of Different comparisons
+```{r}
+lfcs <- seq(0,1.0,0.1)
+comp_df <- data.frame(lfcs = lfcs)
+for (i in seq_along(lfcs)) {
+  lfc <- lfcs[i]
+  dds_res <- results(invivo_iris_dds, alpha=0.05, lfcThreshold = lfc, contrast=c("Condition", "IR", "Control"))
+  nPos <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange > lfc), na.rm=TRUE) 
+  nNeg <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange < -lfc), na.rm=TRUE) 
+  comp_df$nPos[i] = nPos
+  comp_df$nNeg[i] = nNeg
+}
+
+comp_df
+```
+
+
+```{r}
+dds_ir_control_res <- results(invivo_iris_dds, alpha=0.05, lfcThreshold = 0, contrast=c("Condition", "IR", "Control"))
+dds_ir_control_res_df <- dds_ir_control_res[which(with(dds_ir_control_res, padj<0.05)),] %>% as.data.frame
+dds_ir_control_res_df <- dds_ir_control_res_df %>% dplyr::arrange(desc(log2FoldChange), padj)
+symbols <- mapIds(EnsDb.Mmusculus.v79,
+                  keys=rownames(dds_ir_control_res_df),
+                  column="SYMBOL",
+                  keytype="GENEID")
+dds_ir_control_res_df$symbol <- symbols
+write.csv(dds_ir_control_res_df, file=file.path(PATH, "data/dds_invivo_ir_control_diffanal.csv"), row.names = TRUE)
+```
+
+Table of Results
+```{r}
+reactable(dds_ir_control_res_df, searchable = TRUE, filterable = TRUE)
+```
+
+## Invivo IR/IS
+
+Summary of Different comparisons
+```{r}
+lfcs <- seq(0,1.0,0.1)
+comp_df <- data.frame(lfcs = lfcs)
+for (i in seq_along(lfcs)) {
+  lfc <- lfcs[i]
+  dds_res <- results(invivo_iris_dds, alpha=0.05, lfcThreshold = lfc, contrast=c("Condition", "IR", "IS"))
+  nPos <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange > lfc), na.rm=TRUE) 
+  nNeg <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange < -lfc), na.rm=TRUE) 
+  comp_df$nPos[i] = nPos
+  comp_df$nNeg[i] = nNeg
+}
+
+comp_df
+```
+
+
+```{r}
+dds_iris_res <- results(invivo_iris_dds, alpha=0.05, lfcThreshold = 0, contrast=c("Condition", "IR", "IS"))
+dds_iris_res_df <- dds_iris_res[which(with(dds_iris_res, padj<0.05)),] %>% as.data.frame
+dds_iris_res_df <- dds_iris_res_df %>% dplyr::arrange(desc(log2FoldChange), padj)
+symbols <- mapIds(EnsDb.Mmusculus.v79,
+                  keys=rownames(dds_iris_res_df),
+                  column="SYMBOL",
+                  keytype="GENEID")
+dds_iris_res_df$symbol <- symbols
+write.csv(dds_iris_res_df, file=file.path(PATH, "data/dds_invivo_iris_diffanal.csv"), row.names = TRUE)
+```
+
+Table of Results
+```{r}
+reactable(dds_iris_res_df, searchable = TRUE, filterable = TRUE)
+```
+
+## Invivo IS/Control
+
+Summary of Different comparisons
+```{r}
+lfcs <- seq(0,1.0,0.1)
+comp_df <- data.frame(lfcs = lfcs)
+for (i in seq_along(lfcs)) {
+  lfc <- lfcs[i]
+  dds_res <- results(invivo_iris_dds, alpha=0.05, lfcThreshold = lfc, contrast=c("Condition", "IS", "Control"))
+  nPos <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange > lfc), na.rm=TRUE) 
+  nNeg <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange < -lfc), na.rm=TRUE) 
+  comp_df$nPos[i] = nPos
+  comp_df$nNeg[i] = nNeg
+}
+
+comp_df
+```
+
+
+```{r}
+dds_is_ctrl_res <- results(invivo_iris_dds, alpha=0.05, lfcThreshold = 0, contrast=c("Condition", "IS", "Control"))
+dds_is_ctrl_res_df <- dds_is_ctrl_res[which(with(dds_is_ctrl_res, padj<0.05)),] %>% as.data.frame
+dds_is_ctrl_res_df <- dds_is_ctrl_res_df %>% dplyr::arrange(desc(log2FoldChange), padj)
+symbols <- mapIds(EnsDb.Mmusculus.v79,
+                  keys=rownames(dds_is_ctrl_res_df),
+                  column="SYMBOL",
+                  keytype="GENEID")
+dds_is_ctrl_res_df$symbol <- symbols
+write.csv(dds_is_ctrl_res_df, file=file.path(PATH, "data/dds_invivo_is_ctrl_diffanal.csv"), row.names = TRUE)
+```
+
+Table of Results
+```{r}
+reactable(dds_is_ctrl_res_df, searchable = TRUE, filterable = TRUE)
+```
+
+# Signature Comparison
+```{r}
+# Preparing Signatures
+invitro_1514_sc_up <- dds_mir1514_scmiRNA_res_df %>% dplyr::filter(log2FoldChange > 0) %>% rownames
+invitro_1454_sc_up <- dds_mir1454_scmiRNA_res_df %>% dplyr::filter(log2FoldChange > 0) %>% rownames
+invitro_scmiRNA3D_4D_up <- dds_3D_scmiRNA4D_res_df %>% dplyr::filter(log2FoldChange > 0 ) %>% rownames
+invitro_miRNA1453_1454_up <- dds_mir1453_1454_df %>% dplyr::filter(log2FoldChange > 0 ) %>% rownames
+invivo_miR_sc_up <- dds_mir145_scmiRNA_res_df %>% dplyr::filter(log2FoldChange > 0) %>% rownames
+invivo_ir_is_up <- dds_iris_res_df %>% dplyr::filter(log2FoldChange > 0) %>% rownames
+invivo_ir_ctrl_up <- dds_ir_control_res_df %>% dplyr::filter(log2FoldChange > 0) %>% rownames
+invivo_is_ctrl_up <- dds_is_ctrl_res_df %>% dplyr::filter(log2FoldChange > 0) %>% rownames
+
+invitro_1514_sc_dn <- dds_mir1514_scmiRNA_res_df %>% dplyr::filter(log2FoldChange < 0) %>% rownames
+invitro_1454_sc_dn <- dds_mir1454_scmiRNA_res_df %>% dplyr::filter(log2FoldChange < 0) %>% rownames
+invitro_scmiRNA3D_4D_dn <- dds_3D_scmiRNA4D_res_df %>% dplyr::filter(log2FoldChange < 0 ) %>% rownames
+invitro_miRNA1453_1454_dn <- dds_mir1453_1454_df %>% dplyr::filter(log2FoldChange < 0 ) %>% rownames
+invivo_miR_sc_dn <- dds_mir145_scmiRNA_res_df %>% dplyr::filter(log2FoldChange < 0) %>% rownames
+invivo_ir_is_dn <- dds_iris_res_df %>% dplyr::filter(log2FoldChange < 0) %>% rownames
+invivo_ir_ctrl_dn <- dds_ir_control_res_df %>% dplyr::filter(log2FoldChange < 0) %>% rownames
+invivo_is_ctrl_dn <- dds_is_ctrl_res_df %>% dplyr::filter(log2FoldChange < 0) %>% rownames
+
+# Combining labels
+all_sigs <- list(mir1514_sc_up=invitro_1514_sc_up, mir1454_sc_up=invitro_1454_sc_up, miR_sc_up=invivo_miR_sc_up, ir_is_up=invivo_ir_is_up, ir_ctrl_up=invivo_ir_ctrl_up, is_ctrl_up = invivo_is_ctrl_up,
+                 mir1514_sc_dn=invitro_1514_sc_dn, mir1454_sc_dn=invitro_1454_sc_dn, miR_sc_dn=invivo_miR_sc_dn, ir_is_dn=invivo_ir_is_dn, ir_ctrl_dn=invivo_ir_ctrl_dn, is_ctrl_dn = invivo_is_ctrl_dn, miR1453_1454_up = invitro_miRNA1453_1454_up, miR1453_1454_dn = invitro_miRNA1453_1454_dn, sc3D_4D_up = invitro_scmiRNA3D_4D_up, sc3D_4D_dn = invitro_scmiRNA3D_4D_dn)
+```
+
+```{r}
+vennr(all_sigs)
+```
+
+
+# Heatmaps {.tabset}
+
+```{r}
+hcopt <- function(d, HC=NULL, method = "ward.D", members = NULL){
+  require("cba")
+  if ( is.null(HC) ) {
+    HC <- hclust(d,method=method,members=members)
+  }
+  #optimal leaf ordering
+  ORD <- cba::order.optimal(d,merge=HC$merge)
+  HC$merge <- ORD$merge
+  HC$order <- ORD$order
+  HC
+}
+```
+
+## Invitro miR1514/scmiRNA
+```{r}
+## Heatmap for the top 3000
+dat_flt <- 
+  invitro.filtered[c(invitro_1514_sc_up, invitro_1514_sc_dn),c(7:9,14:16)]
+## column annotation
+annot <- invitro.filtered@colData %>% data.frame() %>% dplyr::select("Condition")
+rownames(annot) <- colnames(invitro.filtered@assays@data$counts)
+annot_col <- list(Condition=c(sc_miRNA4D="gray",miR1514D="pink"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(dat_flt@assays@data$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(dat_flt@assays@data$rle_log2)),method="ward.D")
+
+pheatmap(dat_flt@assays@data$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=hc_col,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         scale = "row")
+```
+
+## Invitro miR1454/scmiRNA
+```{r}
+## Heatmap for the top 3000
+dat_flt <- 
+  invitro.filtered[c(invitro_1454_sc_up, invitro_1454_sc_dn),c(3,10,14:16)]
+## column annotation
+annot <- invitro.filtered@colData %>% data.frame() %>% dplyr::select("Condition")
+rownames(annot) <- colnames(invitro.filtered@assays@data$counts)
+annot_col <- list(Condition=c(sc_miRNA4D="gray",miR1454D="pink"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(dat_flt@assays@data$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(dat_flt@assays@data$rle_log2)),method="ward.D")
+
+pheatmap(dat_flt@assays@data$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=hc_col,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         scale = "row")
+```
+
+## Invitro scmiRNA3D/scmiRNA4D
+```{r}
+## Heatmap for the top 3000
+dat_flt <- 
+  invitro.filtered[c(invitro_scmiRNA3D_4D_up, invitro_scmiRNA3D_4D_dn),c(11:16)]
+## column annotation
+annot <- invitro.filtered@colData %>% data.frame() %>% dplyr::select("Condition")
+rownames(annot) <- colnames(invitro.filtered@assays@data$counts)
+annot_col <- list(Condition=c(sc_miRNA4D="gray",sc_miRNA3D="pink"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(dat_flt@assays@data$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(dat_flt@assays@data$rle_log2)),method="ward.D")
+
+pheatmap(dat_flt@assays@data$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=hc_col,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         scale = "row")
+```
+
+## Invitro miR1453D/miR1454D
+```{r}
+## Heatmap for the top 3000
+dat_flt <- 
+  invitro.filtered[c(invitro_miRNA1453_1454_up, invitro_miRNA1453_1454_dn),c(1:2,3,10)]
+## column annotation
+annot <- invitro.filtered@colData %>% data.frame() %>% dplyr::select("Condition")
+rownames(annot) <- colnames(invitro.filtered@assays@data$counts)
+annot_col <- list(Condition=c(miR1454D="gray",miR1453D="pink"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(dat_flt@assays@data$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(dat_flt@assays@data$rle_log2)),method="ward.D")
+
+pheatmap(dat_flt@assays@data$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=hc_col,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         scale = "row")
+```
+## Invivo miRNA
+```{r}
+## Heatmap for the top 3000
+dat_flt <- 
+  invivo.filtered[c(invivo_miR_sc_up, invivo_miR_sc_dn),15:21]
+## column annotation
+annot <- invivo.filtered@colData %>% data.frame() %>% dplyr::select("Condition")
+rownames(annot) <- colnames(invivo.filtered@assays@data$counts)
+annot_col <- list(Condition=c(sc_miRNA="gray",miR_145="pink"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(dat_flt@assays@data$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(dat_flt@assays@data$rle_log2)),method="ward.D")
+
+pheatmap(dat_flt@assays@data$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=hc_col,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         scale = "row")
+```
+
+## Invivo IR/IS
+```{r}
+## Heatmap for the top 3000
+dat_flt <- 
+  invivo.filtered[c(invivo_ir_is_up, invivo_ir_is_dn),5:14]
+rownames(dat_flt@assays@data$rle_log2) <- rowData(dat_flt)$gene_name
+## column annotation
+annot <- invivo.filtered@colData %>% data.frame() %>% dplyr::select("Condition")
+rownames(annot) <- colnames(invivo.filtered@assays@data$counts)
+annot_col <- list(Condition=c(IS="gray",IR="pink"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(dat_flt@assays@data$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(dat_flt@assays@data$rle_log2)),method="ward.D")
+
+pheatmap(dat_flt@assays@data$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=hc_col,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         scale = "row")
+```
+
+## Invivo IR/Control
+```{r}
+## Heatmap for the top 3000
+dat_flt <- 
+  invivo.filtered[c(invivo_ir_ctrl_up, invivo_ir_ctrl_dn), 1:9]
+## column annotation
+annot <- invivo.filtered@colData %>% data.frame() %>% dplyr::select("Condition")
+rownames(annot) <- colnames(invivo.filtered@assays@data$counts)
+annot_col <- list(Condition=c(Control="gray",IR="pink"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(dat_flt@assays@data$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(dat_flt@assays@data$rle_log2)),method="ward.D")
+
+pheatmap(dat_flt@assays@data$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=hc_col,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         scale = "row")
+```
+
+## Invivo IS/Control
+```{r}
+## Heatmap for the top 3000
+dat_flt <- 
+  invivo.filtered[c(invivo_is_ctrl_up, invivo_is_ctrl_dn), c(1:4, 10:14)]
+rownames(dat_flt@assays@data$rle_log2) <- rowData(dat_flt)$gene_name
+## column annotation
+annot <- invivo.filtered@colData %>% data.frame() %>% dplyr::select("Condition")
+rownames(annot) <- colnames(invivo.filtered@assays@data$counts)
+annot_col <- list(Condition=c(Control="gray",IS="pink"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(dat_flt@assays@data$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(dat_flt@assays@data$rle_log2)),method="ward.D")
+
+pheatmap(dat_flt@assays@data$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=hc_col,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         scale = "row")
+```
+
+# Volcano Plot
+
+```{r}
+dds_iris_res
+symbols <- mapIds(EnsDb.Mmusculus.v79,
+                  keys=rownames(dds_iris_res),
+                  column="SYMBOL",
+                  keytype="GENEID")
+dds_iris_res$symbol <- symbols
+```
+
+```{r}
+dds_iris_res %>% 
+  as.data.frame %>% 
+  dplyr::filter(!is.na(symbol) & !is.na(padj)) %>%
+  dplyr::mutate(
+    Significant = if_else(
+      padj < 0.05,
+      TRUE,
+      FALSE)) %>%
+  dplyr::mutate(
+    label = if_else(
+      Significant,
+      symbol,
+      ""
+    )
+  ) %>%
+  ggplot(aes(x = log2FoldChange, y = -log10(padj), color = Significant, label = label)) +
+  geom_point() +
+  geom_text_repel(min.segment.length = 0,
+                  nudge_x = 0.25,
+                  nudge_y = 0.25,
+                  segment.size = 0.2) +
+  theme_minimal() +
+  labs(title = "IR/IS Volcano Plot",
+       x = "log2 Fold Change",
+       y = "-log10 p-value")
+```
+
+
+
+

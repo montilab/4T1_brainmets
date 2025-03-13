@@ -1,0 +1,413 @@
+---
+title: "4T1 RNA Seq - EDA"
+author: "Andrew Chen"
+date:   "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: 'united'
+    toc: true
+    toc_depth: 1
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+    fig_width: 6
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+```{r settings}
+library(Biobase)
+library(SummarizedExperiment)
+library(DESeq2)
+library(tidyverse)
+library(reshape2)
+library(pheatmap)
+library(mclust)
+
+PATH <- file.path(Sys.getenv("MLAB"),"projects/brcameta/exosome/4t1_brca")
+DPATH <- file.path(Sys.getenv("CBM"),"otherStudies/RNAseq/2023-03-22-YuhanExosomeBrCa")
+source(file.path(Sys.getenv("CBMGIT"),"MLscripts/R/rm_low_rnaseq_counts.R"))
+```
+
+```{r data}
+# Loading Count data
+expression.path <- file.path(DPATH,"processed_data_old/Output/Expression/Yuhan_Gene_Expression.rds")
+
+exp.data <- readRDS(expression.path)
+
+## redefine colData (from Stefano's scripts)
+exp.data@colData<- exp.data@colData %>% 
+  data.frame() %>%
+  dplyr::select(INDIVIDUAL_ID) %>%
+  dplyr::mutate(condition=stringr::str_remove(INDIVIDUAL_ID, "\\d")) %>%
+  tidyr::separate(INDIVIDUAL_ID,"[C|R|S|B]",into=c("cell_type","replicate")) %>%
+  dplyr::mutate(cell_type="4T1") %>% 
+  dplyr::mutate(across(everything(),as_factor)) %>%
+  S4Vectors::DataFrame()
+
+dat <- SummarizedExperiment(
+  assays=SimpleList(counts=round(assays(exp.data)$expected_count)),
+  rowData=exp.data@rowRanges,
+  colData=exp.data@colData)
+
+## show sample annotation
+print(dat@colData %>% data.frame())
+```
+
+# EDA of raw/processed counts {.tabset}
+
+```{r}
+summarized2expression <- function(sSet, assay_id=NULL)
+{
+  if (is.null(assay_id)) assay_id <- names(assays(sSet)[1])
+  stopifnot(assay_id %in% names(assays(sSet)))
+  
+  eset <- ExpressionSet(
+    assayData = assays(sSet)[[assay_id]],
+    phenoData = AnnotatedDataFrame(as.data.frame(colData(sSet))),
+    featureData = AnnotatedDataFrame(as.data.frame(rowData(sSet)))
+  )
+  return(eset)
+}
+
+expression2summarized <- function(eSet) {
+  sSet <- SummarizedExperiment(
+    assays=SimpleList(counts=exprs(eSet)),
+    rowData=fData(eSet),
+    colData=pData(eSet))
+  return(sSet)
+}
+```
+
+Gene Filtering
+```{r}
+# Removing genes with less than 1 read per million across 3 samples
+dat.filtered <- rm_low_rnaseq_counts(dat, min_samples = 3)
+```
+
+
+DESeq Sample-Level normalization
+```{r}
+# We want to pool IS and Control together 
+dat_pool <- dat.filtered
+dat_pool$condition[dat$condition == "IS"] = "C"
+dat_pool$condition <- factor(dat_pool$condition)
+
+#DESeq objects
+dds <- DESeq2::DESeqDataSetFromMatrix(countData=round(assays(dat.filtered)$counts),
+                                      colData=dat.filtered@colData,
+                                      design=~condition)
+dds <- estimateSizeFactors(dds)
+dds$condition <- relevel(dds$condition, ref = "C")
+
+assays(dat.filtered)$rle <- counts(dds, normalized=TRUE)    # Get normalized counts
+assays(dat.filtered)$rle_log2 <- log2(assays(dat.filtered)$rle + 1) # Calculate log2 normalized counts
+
+dds_pool <- DESeq2::DESeqDataSetFromMatrix(countData=round(assays(dat_pool)$counts),
+                                      colData=dat_pool@colData,
+                                      design=~condition)
+dds_pool <- estimateSizeFactors(dds_pool)
+dds_pool$condition <- relevel(dds_pool$condition, ref = "C")
+
+
+assays(dat_pool)$rle <- counts(dds_pool, normalized=TRUE)    # Get normalized counts
+assays(dat_pool)$rle_log2 <- log2(assays(dat_pool)$rle + 1)  # Calculate log2 normalized counts
+```
+
+## Mad vs Median
+```{r}
+pool.DF <- data.frame(raw_median=matrixStats::rowMedians(assays(dat.filtered)$counts, na.rm=TRUE),
+                 raw_mad=matrixStats::rowMads(assays(dat.filtered)$count, na.rm=TRUE),
+                 median=matrixStats::rowMedians(assays(dat.filtered)$rle_log2, na.rm=TRUE),
+                 mad=matrixStats::rowMads(assays(dat.filtered)$rle_log2, na.rm=TRUE))
+
+ggplot2::ggplot(pool.DF,aes(x=raw_median,y=raw_mad)) +
+  geom_point() + 
+  geom_smooth(mmethod = "loess") +
+  labs(title = "Raw Mad vs Median")
+```
+
+## Normalized Mad vs Median
+```{r}
+ggplot2::ggplot(pool.DF,aes(x=median,y=mad)) +
+  geom_point() +
+  geom_smooth(mmethod = "loess") + 
+  labs(title = "Normalized Mad vs Median")
+```
+
+# Count Distributions {.tabset}
+
+## Unnormalized
+```{r}
+assays(dat.filtered)$counts %>% melt %>% 
+  ggplot(aes(x=Var2, fill=Var2, y = value)) + 
+  geom_boxplot() +
+  labs(title = "Sample-specific Distribution")
+```
+
+## DESeq Normalized
+```{r}
+counts(dds_pool, normalize=TRUE) %>% melt %>% 
+  ggplot(aes(x=Var2, fill=Var2, y = value)) + 
+  geom_boxplot() +
+  labs(title = "Sample-specific Distribution")
+```
+
+## DESeq normalized + log 2 transformed
+```{r}
+assays(dat.filtered)$rle_log2 %>% melt %>% 
+  ggplot(aes(x=Var2, fill=Var2, y = value)) + 
+  geom_boxplot() +
+  labs(title = "Sample-specific Distribution")
+```
+
+# Heatmaps {.tabset}
+
+```{r}
+hcopt <- function(d, HC=NULL, method = "ward.D", members = NULL){
+  require("cba")
+  if ( is.null(HC) ) {
+    HC <- hclust(d,method=method,members=members)
+  }
+  #optimal leaf ordering
+  ORD <- cba::order.optimal(d,merge=HC$merge)
+  HC$merge <- ORD$merge
+  HC$order <- ORD$order
+  HC
+}
+```
+
+## TGFB/IS/IR/Control
+```{r}
+## Heaetmap for the top 3000
+dat_flt <- 
+  dat.filtered[order(matrixStats::rowMads(assays(dat.filtered)$rle_log2),decreasing = TRUE)[1:3000],]
+## column annotation
+annot <- dat.filtered@colData %>% data.frame() %>% dplyr::select("condition")
+annot_col <- list(condition=c(C="gray",IR="pink", IS="orange", TGFB="purple"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(assays(dat_flt)$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(assays(dat_flt)$rle_log2)),method="ward.D")
+
+pheatmap(assays(dat_flt)$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=hc_col,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         scale = "row")
+```
+
+## TGFB/IR/(IS+Control)
+```{r}
+## Heaetmap for the top 3000
+dat_pool_flt <- 
+  dat_pool[order(matrixStats::rowMads(assays(dat_pool)$rle_log2),decreasing = TRUE)[1:3000],]
+## column annotation
+annot <- dat_pool@colData %>% data.frame() %>% dplyr::select("condition")
+annot_col <- list(condition=c(C="gray",IR="pink",TGFB="purple"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(assays(dat_pool_flt)$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(assays(dat_pool_flt)$rle_log2)),method="ward.D")
+
+pheatmap(assays(dat_pool_flt)$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=hc_col,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         scale = "row")
+```
+
+# DNA Methyltransferase genes (dnmt)
+```{r}
+methyltransferase_genes <- read.delim(file.path(PATH, "data/methyltransferase_genes_ncbi.txt"))
+dat.filtered.genes <- unlist(rowData(dat.filtered)$mgi_symbol)
+dnmt_genes_filter <- dat.filtered.genes %in% methyltransferase_genes$Symbol
+```
+
+```{r}
+dat_dnmt_flt <- 
+  dat.filtered[dnmt_genes_filter,]
+rownames(dat_dnmt_flt) <- unlist(rowData(dat_dnmt_flt)$mgi_symbol)
+## column annotation
+annot <- dat_dnmt_flt@colData %>% data.frame() %>% dplyr::select("condition")
+annot_col <- list(condition=c(C="gray",IR="pink", IS="orange", TGFB="purple"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(assays(dat_dnmt_flt)$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(assays(dat_dnmt_flt)$rle_log2)),method="ward.D")
+
+tiff(file=file.path(PATH, "results/dnmt_heatmap.tiff"), width=5, height=5, res=1200, units="in")
+pheatmap(assays(dat_dnmt_flt)$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=FALSE,
+         cellheight = 11,
+         cellwidth = 15,
+         treeheight_row = 5,
+         treeheight_col = 5,
+         fontsize_row = 9,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         scale = "row")
+dev.off()
+```
+
+# Histone Methylation genes
+```{r}
+h3_meth_genes <- c("PRC1", "PRC2", "EZH2", "EED", "SUZ12", "RING1", "RNF2", "BRD2", "BRD3", "BRD4", "KDM1A", "KDM2A", "KDM3A", "KDM4A", "KDM5A")
+library(babelgene)
+mouse_h3_meth_genes <- babelgene::orthologs(genes = h3_meth_genes, species = "mouse")
+
+dat.filtered.genes <- unlist(rowData(dat.filtered)$mgi_symbol)
+h3_meth_genes_filter <- dat.filtered.genes %in% mouse_h3_meth_genes$symbol
+```
+
+```{r}
+dat_dnmt_flt <- 
+  dat.filtered[h3_meth_genes_filter,]
+rownames(dat_dnmt_flt) <- unlist(rowData(dat_dnmt_flt)$mgi_symbol)
+## column annotation
+annot <- dat_dnmt_flt@colData %>% data.frame() %>% dplyr::select("condition")
+annot_col <- list(condition=c(C="gray",IR="pink", IS="orange", TGFB="purple"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(assays(dat_dnmt_flt)$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(assays(dat_dnmt_flt)$rle_log2)),method="ward.D")
+
+tiff(file=file.path(PATH, "results/h3_meth_genes_heatmap.tiff"), width=5, height=5, res=1200, units="in")
+pheatmap(assays(dat_dnmt_flt)$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=FALSE,
+         cellheight = 11,
+         cellwidth = 15,
+         treeheight_row = 5,
+         treeheight_col = 5,
+         fontsize_row = 9,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         scale = "row")
+dev.off()
+```
+
+# Cell Cycle genes 
+```{r}
+cell_cycle_genes <- read.delim(file.path(PATH, "data/cell_cycle_genes.txt"), header=FALSE) %>% pull(V1)
+
+dat.filtered.genes <- unlist(rowData(dat.filtered)$mgi_symbol)
+cell_cycle_genes_filter <- dat.filtered.genes %in% cell_cycle_genes
+```
+
+```{r}
+dat_dnmt_flt <- 
+  dat.filtered[cell_cycle_genes_filter,]
+rownames(dat_dnmt_flt) <- unlist(rowData(dat_dnmt_flt)$mgi_symbol)
+## column annotation
+annot <- dat_dnmt_flt@colData %>% data.frame() %>% dplyr::select("condition")
+annot_col <- list(condition=c(C="gray",IR="pink", IS="orange", TGFB="purple"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(assays(dat_dnmt_flt)$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(assays(dat_dnmt_flt)$rle_log2)),method="ward.D")
+
+tiff(file=file.path(PATH, "results/cell_cycle_genes_heatmap.tiff"), width=7, height=7, res=1200, units="in")
+pheatmap(assays(dat_dnmt_flt)$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=hc_col,
+         cellheight = 5,
+         cellwidth = 15,
+         treeheight_row = 5,
+         treeheight_col = 5,
+         fontsize_row = 4,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         scale = "row")
+dev.off()
+```
+
+# Glucose Metabolism genes 
+```{r}
+glucose_met_genes <- read.delim(file.path(PATH, "data/glucose_met_genes.txt"), header=FALSE) %>% pull(V1)
+
+dat.filtered.genes <- unlist(rowData(dat.filtered)$mgi_symbol)
+glucose_met_genes_filter <- dat.filtered.genes %in% glucose_met_genes
+```
+
+```{r}
+dat_dnmt_flt <- 
+  dat.filtered[glucose_met_genes_filter,]
+rownames(dat_dnmt_flt) <- unlist(rowData(dat_dnmt_flt)$mgi_symbol)
+## column annotation
+annot <- dat_dnmt_flt@colData %>% data.frame() %>% dplyr::select("condition")
+annot_col <- list(condition=c(C="gray",IR="pink", IS="orange", TGFB="purple"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(assays(dat_dnmt_flt)$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(assays(dat_dnmt_flt)$rle_log2)),method="ward.D")
+
+tiff(file=file.path(PATH, "results/glucose_met_genes_heatmap.tiff"), width=7, height=7, res=1200, units="in")
+pheatmap(assays(dat_dnmt_flt)$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=hc_col,
+         cellheight = 5,
+         cellwidth = 15,
+         treeheight_row = 5,
+         treeheight_col = 5,
+         fontsize_row = 4,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         scale = "row")
+dev.off()
+```
+
+# Fatty Acid genes 
+```{r}
+fatty_acid_genes <- read.delim(file.path(PATH, "data/fatty_acid_genes.txt"), header=FALSE) %>% pull(V1)
+
+dat.filtered.genes <- unlist(rowData(dat.filtered)$mgi_symbol)
+fatty_acid_genes_filter <- dat.filtered.genes %in% fatty_acid_genes
+```
+
+```{r}
+dat_dnmt_flt <- 
+  dat.filtered[fatty_acid_genes_filter,]
+rownames(dat_dnmt_flt) <- unlist(rowData(dat_dnmt_flt)$mgi_symbol)
+## column annotation
+annot <- dat_dnmt_flt@colData %>% data.frame() %>% dplyr::select("condition")
+annot_col <- list(condition=c(C="gray",IR="pink", IS="orange", TGFB="purple"))
+library(cba)
+hc_row <- hcopt(as.dist(1-cor(t(assays(dat_dnmt_flt)$rle_log2))),method="ward.D")
+hc_col <- hcopt(dist(t(assays(dat_dnmt_flt)$rle_log2)),method="ward.D")
+
+tiff(file=file.path(PATH, "results/fatty_acid_genes_heatmap.tiff"), width=7, height=7, res=1200, units="in")
+pheatmap(assays(dat_dnmt_flt)$rle_log2,
+         annotation_col = annot,
+         annotation_colors = annot_col,
+         cluster_rows=hc_row,
+         cluster_cols=hc_col,
+         cellheight = 5,
+         cellwidth = 15,
+         treeheight_row = 5,
+         treeheight_col = 5,
+         fontsize_row = 4,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         scale = "row")
+dev.off()
+```
+
+# Save data
+```{r}
+saveRDS(dat.filtered,file=file.path(PATH,"data/4T1_sExp.rds"))
+saveRDS(dat_pool,file=file.path(PATH,"data/4T1_control_IS_pool_sExp.rds"))
+```
+

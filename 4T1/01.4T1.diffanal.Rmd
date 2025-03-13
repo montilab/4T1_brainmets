@@ -1,0 +1,578 @@
+---
+title: "4T1 RNA Seq - Differential Analysis"
+author: "Andrew Chen"
+date:   "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: 'united'
+    toc: true
+    toc_depth: 1
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+```{r}
+library(Biobase)
+library(SummarizedExperiment)
+library(tidyverse)
+library(ggplot2)
+library(DESeq2)
+library(reactable)
+library(cba)
+library(pheatmap)
+library(vennr)
+
+PATH <- file.path(Sys.getenv("MLAB"),"projects/brcameta/exosome/4t1_brca/")
+DPATH <- file.path(Sys.getenv("CBM"),"otherStudies/RNAseq/2023-03-22-YuhanExosomeBrCa")
+```
+
+# Load Data
+```{r}
+dat <- readRDS(file.path(PATH,"data/4T1_sExp.rds"))
+dat_pool <- readRDS(file.path(PATH,"data/4T1_control_IS_pool_sExp.rds"))
+```
+
+# DESeq Result Tables {.tabset}
+
+> DESeq2 performs an internal normalization where geometric mean is calculated for each gene across all samples. The counts for a gene in each sample is then divided by this mean. The median of these ratios in a sample is the size factor for that sample. This procedure corrects for library size and RNA composition bias, which can arise for example when only a small number of genes are very highly expressed in one experiment condition but not in the other. 
+
+```{r}
+dds <- DESeq2::DESeqDataSetFromMatrix(countData=round(assays(dat)$counts),
+                                      colData=dat@colData,
+                                      design=~condition)
+```
+
+> DESeq2 fits negative binomial generalized linear models for each gene and uses the Wald test for significance testing. Results were filtered so that only genes that had a |log fold change| > 0.5 and adjusted p-value < 0.05 (FDR) were retained.
+
+```{r}
+# Map EnsemblID to GeneID
+ensembl_symbol <- function(ensembl_id, sExp) {
+  return(unlist(rowData(sExp)[ensembl_id,"mgi_symbol"]))
+}
+symbol_ensembl <- function(gene_id, sExp) {
+  return(rownames(sExp)[rowData(sExp)$mgi_symbol == gene_id])
+}
+```
+
+```{r}
+dds <- DESeq(dds)
+```
+
+## IR IS
+
+Summary of Different comparisons
+```{r}
+lfcs <- seq(0,0.5,0.1)
+comp_df <- data.frame(lfcs = lfcs)
+for (i in seq_along(lfcs)) {
+  lfc <- lfcs[i]
+  dds_res <- results(dds, alpha=0.05, lfcThreshold = lfc, contrast=c("condition", "IR", "IS"))
+  nPos <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange > lfc), na.rm=TRUE) 
+  nNeg <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange < -lfc), na.rm=TRUE) 
+  comp_df$nPos[i] = nPos
+  comp_df$nNeg[i] = nNeg
+}
+
+comp_df
+```
+
+
+
+```{r}
+dds_IR_IS_res <- results(dds, alpha=0.05, lfcThreshold = 0.1, contrast=c("condition", "IR", "IS"))
+dds_IR_IS_res_df <- dds_IR_IS_res[which(with(dds_IR_IS_res, padj<0.05 & (log2FoldChange < -0.1 | log2FoldChange > 0.1))),] %>% as.data.frame
+dds_IR_IS_res_df_symbol <- unlist(lapply(rownames(dds_IR_IS_res_df), ensembl_symbol, sExp=dat))
+dds_IR_IS_res_df <- dds_IR_IS_res_df[dds_IR_IS_res_df_symbol != "",]
+rownames(dds_IR_IS_res_df) <- dds_IR_IS_res_df_symbol[dds_IR_IS_res_df_symbol != ""]
+write.csv(dds_IR_IS_res_df[order(dds_IR_IS_res_df$log2FoldChange),], file=file.path(PATH, "data/dds_IR_IS_diffanal.csv"))
+```
+
+Table of Results
+```{r}
+reactable(dds_IR_IS_res_df, searchable = TRUE)
+```
+
+## TGFB IS
+
+Summary of Different comparisons
+```{r}
+lfcs <- seq(0,1.0,0.2)
+comp_df <- data.frame(lfcs = lfcs)
+for (i in seq_along(lfcs)) {
+  lfc <- lfcs[i]
+  dds_res <- results(dds, alpha=0.05, lfcThreshold = lfc, contrast=c("condition", "TGFB", "IS"))
+  nPos <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange > lfc), na.rm=TRUE) 
+  nNeg <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange < -lfc), na.rm=TRUE) 
+  comp_df$nPos[i] = nPos
+  comp_df$nNeg[i] = nNeg
+}
+
+comp_df
+```
+
+
+
+```{r}
+dds_TGFB_IS_res <- results(dds, alpha=0.05, lfcThreshold = 1, contrast=c("condition", "TGFB", "IS"))
+dds_TGFB_IS_res_df <- dds_TGFB_IS_res[which(with(dds_TGFB_IS_res, padj<0.05 & (log2FoldChange < -1 | log2FoldChange > 1))),] %>% as.data.frame
+dds_TGFB_IS_res_df_symbol <- unlist(lapply(rownames(dds_TGFB_IS_res_df), ensembl_symbol, sExp=dat))
+dds_TGFB_IS_res_df <- dds_TGFB_IS_res_df[dds_TGFB_IS_res_df_symbol != "",]
+rownames(dds_TGFB_IS_res_df) <- dds_TGFB_IS_res_df_symbol[dds_TGFB_IS_res_df_symbol != ""]
+write.csv(dds_TGFB_IS_res_df[order(dds_TGFB_IS_res_df$log2FoldChange),], file=file.path(PATH, "data/dds_TGFB_IS_diffanal.csv"))
+```
+
+Table of Results
+```{r}
+reactable(dds_TGFB_IS_res_df, searchable = TRUE)
+```
+
+## IR Control 
+```{r}
+lfcs <- seq(0,0.5,0.1)
+comp_df <- data.frame(lfcs = lfcs)
+for (i in seq_along(lfcs)) {
+  lfc <- lfcs[i]
+  dds_res <- results(dds, alpha=0.05, lfcThreshold = lfc, contrast=c("condition", "IR", "C"))
+  nPos <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange > lfc), na.rm=TRUE) 
+  nNeg <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange < -lfc), na.rm=TRUE) 
+  comp_df$nPos[i] = nPos
+  comp_df$nNeg[i] = nNeg
+}
+
+comp_df
+```
+
+
+```{r}
+dds_IR_C_res <- results(dds, alpha=0.05, lfcThreshold = 0.5, contrast=c("condition", "IR", "C"))
+summary(dds_IR_C_res)
+
+dds_IR_C_res_df <- dds_IR_C_res[which(with(dds_IR_C_res, padj<0.05 & (log2FoldChange < -0.5 | log2FoldChange > 0.5))),] %>% as.data.frame
+dds_IR_C_res_df_symbol <- unlist(lapply(rownames(dds_IR_C_res_df), ensembl_symbol, sExp=dat))
+dds_IR_C_res_df <- dds_IR_C_res_df[dds_IR_C_res_df_symbol != "",]
+rownames(dds_IR_C_res_df) <- dds_IR_C_res_df_symbol[dds_IR_C_res_df_symbol != ""]
+write.csv(dds_IR_C_res_df[order(dds_IR_C_res_df$log2FoldChange),], file=file.path(PATH, "data/dds_IR_C_diffanal.csv"))
+```
+
+Table of Results
+```{r}
+reactable(dds_IR_C_res_df, searchable = TRUE)
+```
+
+## TGFB Control 
+```{r}
+lfcs <- seq(0,1,0.2)
+comp_df <- data.frame(lfcs = lfcs)
+for (i in seq_along(lfcs)) {
+  lfc <- lfcs[i]
+  dds_res <- results(dds, alpha=0.05, lfcThreshold = lfc, contrast=c("condition", "TGFB", "C"))
+  nPos <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange > lfc), na.rm=TRUE) 
+  nNeg <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange < -lfc), na.rm=TRUE) 
+  comp_df$nPos[i] = nPos
+  comp_df$nNeg[i] = nNeg
+}
+
+comp_df
+```
+
+
+```{r}
+dds_TGFB_C_res <- results(dds, alpha=0.05, lfcThreshold = 1, contrast=c("condition", "TGFB", "C"))
+summary(dds_TGFB_C_res)
+
+dds_TGFB_C_res_df <- dds_TGFB_C_res[which(with(dds_res, padj<0.05 & (log2FoldChange < -1 | log2FoldChange > 1))),] %>% as.data.frame
+dds_TGFB_C_res_df_symbol <- unlist(lapply(rownames(dds_TGFB_C_res_df), ensembl_symbol, sExp=dat))
+dds_TGFB_C_res_df <- dds_TGFB_C_res_df[dds_TGFB_C_res_df_symbol != "",]
+rownames(dds_TGFB_C_res_df) <- dds_TGFB_C_res_df_symbol[dds_TGFB_C_res_df_symbol != ""]
+write.csv(dds_TGFB_C_res_df[order(dds_TGFB_C_res_df$log2FoldChange),], file=file.path(PATH, "data/dds_TGFB_C_diffanal.csv"))
+```
+
+Table of Results
+```{r}
+reactable(dds_TGFB_C_res_df, searchable = TRUE)
+```
+
+## IS Control
+```{r}
+lfcs <- seq(0,0.5,0.1)
+comp_df <- data.frame(lfcs = lfcs)
+for (i in seq_along(lfcs)) {
+  lfc <- lfcs[i]
+  dds_res <- results(dds, alpha=0.05, lfcThreshold = lfc, contrast=c("condition", "IS", "C"))
+  nPos <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange > lfc), na.rm=TRUE) 
+  nNeg <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange < -lfc), na.rm=TRUE) 
+  comp_df$nPos[i] = nPos
+  comp_df$nNeg[i] = nNeg
+}
+
+comp_df
+```
+
+```{r}
+dds_IS_C_res <- results(dds, alpha=0.05, lfcThreshold = 0.5, contrast=c("condition", "IS", "C"))
+summary(dds_IS_C_res)
+
+dds_IS_C_res_df <- as.data.frame(dds_IS_C_res[which(dds_IS_C_res$padj < 0.05, dds_IS_C_res$log2FoldChange > 0.5),])
+dds_IS_C_res_df_symbol <- unlist(lapply(rownames(dds_IS_C_res_df), ensembl_symbol, sExp=dat_pool))
+dds_IS_C_res_df <- dds_IS_C_res_df[dds_IS_C_res_df_symbol != "",]
+rownames(dds_IS_C_res_df) <- dds_IS_C_res_df_symbol[dds_IS_C_res_df_symbol != ""]
+write.csv(dds_IS_C_res_df[order(dds_IS_C_res_df$log2FoldChange),], file=file.path(PATH,"data/dds_IS_Control_pool_diffanal.csv"))
+```
+
+Table of Results
+```{r}
+reactable(dds_IS_C_res_df, searchable = TRUE)
+```
+
+## TGFB IR
+```{r}
+lfcs <- seq(0,1,0.2)
+comp_df <- data.frame(lfcs = lfcs)
+for (i in seq_along(lfcs)) {
+  lfc <- lfcs[i]
+  dds_res <- results(dds, alpha=0.05, lfcThreshold = lfc, contrast=c("condition", "TGFB", "IR"))
+  nPos <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange > lfc), na.rm=TRUE) 
+  nNeg <- sum((dds_res$padj < 0.05) & (dds_res$log2FoldChange < -lfc), na.rm=TRUE) 
+  comp_df$nPos[i] = nPos
+  comp_df$nNeg[i] = nNeg
+}
+
+comp_df
+```
+
+```{r}
+dds_TGFB_IR_res <- results(dds, alpha=0.05, lfcThreshold = 1, contrast=c("condition", "TGFB", "IR"))
+summary(dds_TGFB_IR_res)
+
+dds_TGFB_IR_res_df <- as.data.frame(dds_TGFB_IR_res[which(dds_TGFB_IR_res$padj < 0.05, dds_TGFB_IR_res$log2FoldChange > 0.5),])
+dds_TGFB_IR_res_df_symbol <- unlist(lapply(rownames(dds_TGFB_IR_res_df), ensembl_symbol, sExp=dat_pool))
+dds_TGFB_IR_res_df <- dds_TGFB_IR_res_df[dds_TGFB_IR_res_df_symbol != "",]
+rownames(dds_TGFB_IR_res_df) <- dds_TGFB_IR_res_df_symbol[dds_TGFB_IR_res_df_symbol != ""]
+write.csv(dds_TGFB_IR_res_df[order(dds_TGFB_IR_res_df$log2FoldChange),], file=file.path(PATH,"data/dds_TGFB_IR_diffanal.csv"))
+```
+
+Table of Results
+```{r}
+reactable(dds_TGFB_IR_res_df, searchable = TRUE)
+```
+
+
+# Signature Comparison
+```{r}
+# Preparing Signatures
+ir_c_up_signatures <- dds_IR_C_res_df %>% dplyr::filter(log2FoldChange > 0) %>% rownames
+is_c_up_signatures <- dds_IS_C_res_df %>% dplyr::filter(log2FoldChange > 0) %>% rownames
+tgfb_c_up_signatures <- dds_TGFB_C_res_df %>% dplyr::filter(log2FoldChange > 0) %>% rownames
+ir_is_up_signatures <- dds_IR_IS_res_df %>% dplyr::filter(log2FoldChange > 0) %>% rownames
+tgfb_is_up_signatures <- dds_TGFB_IS_res_df %>% dplyr::filter(log2FoldChange > 0) %>% rownames
+tgfb_ir_up_signatures <- dds_TGFB_IR_res_df %>% dplyr::filter(log2FoldChange > 0) %>% rownames
+
+ir_c_down_signatures <- dds_IR_C_res_df %>% dplyr::filter(log2FoldChange < -0) %>% rownames
+is_c_down_signatures <- dds_IS_C_res_df %>% dplyr::filter(log2FoldChange < -0) %>% rownames
+tgfb_c_down_signatures <- dds_TGFB_C_res_df %>% dplyr::filter(log2FoldChange < -0) %>% rownames
+ir_is_down_signatures <- dds_IR_IS_res_df %>% dplyr::filter(log2FoldChange < -0) %>% rownames
+tgfb_is_down_signatures <- dds_TGFB_IS_res_df %>% dplyr::filter(log2FoldChange < -0) %>% rownames
+tgfb_ir_down_signatures <- dds_TGFB_IR_res_df %>% dplyr::filter(log2FoldChange < -0) %>% rownames
+
+# Combining labels
+all_sigs <- list(ir_c_up=ir_c_up_signatures, is_c_up=is_c_up_signatures, ir_is_up=ir_is_up_signatures,
+                 tgfb_c_up=tgfb_c_up_signatures, tgfb_is_up=tgfb_is_up_signatures, tgfb_ir_up=tgfb_ir_up_signatures,
+                 ir_c_down=ir_c_down_signatures, is_c_down=is_c_down_signatures, ir_is_down=ir_is_down_signatures,
+                 tgfb_c_down=tgfb_c_down_signatures, tgfb_is_down=tgfb_is_down_signatures, tgfb_ir_down=tgfb_ir_down_signatures)
+ensembl_sigs <- lapply(all_sigs, function(x) unlist(lapply(x, symbol_ensembl, sExp=dat)))
+```
+
+```{r}
+vennr(all_sigs)
+```
+
+
+# Heatmaps {.tabset}
+
+```{r}
+hcopt <- function(d, HC=NULL, method = "ward.D", members = NULL){
+  require("cba")
+  if ( is.null(HC) ) {
+    HC <- hclust(d,method=method,members=members)
+  }
+  #optimal leaf ordering
+  ORD <- cba::order.optimal(d,merge=HC$merge)
+  HC$merge <- ORD$merge
+  HC$order <- ORD$order
+  HC
+}
+```
+
+## All DE Genes
+```{r}
+unique_union_de_genes <- ensembl_sigs %>% unlist %>% unique
+dat_flt <- dat[unique_union_de_genes,]
+
+dds_annot_col <- colData(dat_flt) %>% data.frame %>% dplyr::select(condition)
+
+dds_annot_row <- data.frame(
+  ir_c = dds_IR_C_res %>% as.data.frame() %>% dplyr::filter(row.names(dds_IR_C_res) %in% unique_union_de_genes) %>%
+    dplyr::transmute(ir_c=ifelse(log2FoldChange>0,"up","down")),
+  is_c = dds_IS_C_res %>% as.data.frame() %>% dplyr::filter(row.names(dds_IS_C_res) %in% unique_union_de_genes) %>%
+    dplyr::transmute(is_c=ifelse(log2FoldChange>0,"up","down")),
+  ir_is = dds_IR_IS_res %>% as.data.frame() %>% dplyr::filter(row.names(dds_IR_IS_res) %in% unique_union_de_genes) %>%
+    dplyr::transmute(ir_is=ifelse(log2FoldChange>0,"up","down"))
+)
+
+dds_annot_colors <- list(condition=c(C="gray",IR="pink", IS="orange", TGFB="purple"),
+                     ir_c=c(up="red",down="blue"),
+                     is_c=c(up="red",down="blue"),
+                     ir_is=c(up="red",down="blue"))
+  
+## use Euclidean distance for columns/samples
+## use ward as agglomeration rule
+dds.hc01.col <- hcopt(dist(t(assays(dat_flt)$rle_log2)),method="ward.D2")
+
+## use 1-correlation as distance for for rows/genes
+## use ward as agglomeration rule
+dds.hc01.row <- hcopt(as.dist(1-cor(t(assays(dat_flt)$rle_log2))),method="ward.D2")
+```
+
+
+```{r}
+pheatmap(assays(dat_flt)$rle_log2,
+         annotation_col = dds_annot_col,
+         annotation_row = dds_annot_row,
+         annotation_colors = dds_annot_colors,
+         cluster_rows=dds.hc01.row,
+         cluster_cols=dds.hc01.col,
+         treeheight_row = 0,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         scale = "row")
+```
+
+> The TGFbeta control has a strong signal. IR and IS are more similar to each other compared to the control. IR and IS differ in the upregulated genes.
+
+## All DE Genes (No TGFB)
+```{r}
+no_tgfb_ensembl <- ensembl_sigs[!grepl("tgfb", x=names(ensembl_sigs), fixed=TRUE)]
+unique_union_de_genes_notgfb <- no_tgfb_ensembl %>% unlist %>% unique
+dat_flt <- dat[unique_union_de_genes_notgfb,dat$condition != "TGFB"]
+
+dds_annot_col <- colData(dat_flt) %>% data.frame %>% dplyr::select(condition)
+
+dds_annot_row <- data.frame(
+  ir_c = dds_IR_C_res %>% as.data.frame() %>% dplyr::filter(row.names(dds_IR_C_res) %in% unique_union_de_genes_notgfb) %>%
+    dplyr::transmute(ir_c=ifelse(log2FoldChange>0,"up","down")),
+  is_c = dds_IS_C_res %>% as.data.frame() %>% dplyr::filter(row.names(dds_IS_C_res) %in% unique_union_de_genes_notgfb) %>%
+    dplyr::transmute(is_c=ifelse(log2FoldChange>0,"up","down")),
+  ir_is = dds_IR_IS_res %>% as.data.frame() %>% dplyr::filter(row.names(dds_IR_IS_res) %in% unique_union_de_genes_notgfb) %>%
+    dplyr::transmute(ir_is=ifelse(log2FoldChange>0,"up","down"))
+)
+
+dds_annot_colors <- list(condition=c(C="gray",IR="pink", IS="orange"),
+                     ir_c=c(up="red",down="blue"),
+                     is_c=c(up="red",down="blue"),
+                     ir_is=c(up="red",down="blue"))
+  
+## use Euclidean distance for columns/samples
+## use ward as agglomeration rule
+dds.hc01.col <- hcopt(dist(t(assays(dat_flt)$rle_log2)),method="ward.D2")
+
+## use 1-correlation as distance for for rows/genes
+## use ward as agglomeration rule
+dds.hc01.row <- hcopt(as.dist(1-cor(t(assays(dat_flt)$rle_log2))),method="ward.D2")
+```
+
+
+```{r}
+pheatmap(assays(dat_flt)$rle_log2,
+         annotation_col = dds_annot_col,
+         annotation_row = dds_annot_row,
+         annotation_colors = dds_annot_colors,
+         cluster_rows=dds.hc01.row,
+         treeheight_row = 0,
+         #cluster_cols=dds.hc01.col,
+         cluster_cols = FALSE,
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         scale = "row")
+```
+
+
+## IR IS Heatmap
+
+```{r}
+ir_is_ensembl_sigs <- ensembl_sigs[c("ir_is_up", "ir_is_down")]
+ir_is_mgi_sigs <- lapply(ir_is_ensembl_sigs, ensembl_symbol, sExp=dat)
+```
+
+```{r}
+dat_flt <- dat[unlist(ir_is_ensembl_sigs),]
+rownames(dat_flt) <- rowData(dat_flt)$mgi_symbol %>% unlist
+
+dds_annot_col <- colData(dat_flt) %>% data.frame %>% dplyr::select(condition)
+
+dds_annot_row <- data.frame(
+  ir_is = dds_IR_IS_res %>% as.data.frame() %>% dplyr::filter(row.names(dds_IR_IS_res) %in% unlist(ir_is_ensembl_sigs)) %>%
+    dplyr::transmute(ir_is=ifelse(log2FoldChange>0,"up","down"))
+)
+mgi_rownames <- lapply(rownames(dds_annot_row), ensembl_symbol, sExp=dat) %>% unlist
+rownames(dds_annot_row) <- mgi_rownames
+
+dds_annot_colors <- list(condition=c(C="gray",IR="pink", IS="orange", TGFB="purple"),
+                     ir_c=c(up="red",down="blue"),
+                     is_c=c(up="red",down="blue"),
+                     ir_is=c(up="red",down="blue"))
+  
+## use Euclidean distance for columns/samples
+## use ward as agglomeration rule
+dds.hc01.col <- hcopt(dist(t(assays(dat_flt)$rle_log2)),method="ward.D2")
+
+## use 1-correlation as distance for for rows/genes
+## use ward as agglomeration rule
+dds.hc01.row <- hcopt(as.dist(1-cor(t(assays(dat_flt)$rle_log2))),method="ward.D2")
+```
+
+
+```{r}
+tiff(file=file.path(PATH, "results/ir_is_genes_heatmap.tiff"), width=7, height=7, res=1200, units="in")
+pheatmap(assays(dat_flt)$rle_log2,
+         annotation_col = dds_annot_col,
+         annotation_row = dds_annot_row,
+         annotation_colors = dds_annot_colors,
+         cluster_rows=dds.hc01.row,
+         cluster_cols=FALSE,
+         show_rownames = TRUE,
+         cellheight = 5,
+         cellwidth = 15,
+         treeheight_row = 5,
+         treeheight_col = 5,
+         fontsize_row = 4,
+         show_colnames = TRUE,
+         scale = "row")
+dev.off()
+
+```
+
+```{r}
+pheatmap(assays(dat_flt)$rle_log2,
+         annotation_col = dds_annot_col,
+         annotation_row = dds_annot_row,
+         annotation_colors = dds_annot_colors,
+         cluster_rows=dds.hc01.row,
+         cluster_cols=FALSE,
+         show_rownames = TRUE,
+         cellheight = 5,
+         cellwidth = 15,
+         treeheight_row = 5,
+         treeheight_col = 5,
+         fontsize_row = 4,
+         show_colnames = TRUE,
+         scale = "row")
+```
+
+## IR IS No TGFB
+
+```{r}
+dat_flt <- dat[unlist(ir_is_ensembl_sigs),dat$condition != "TGFB"]
+rownames(dat_flt) <- rowData(dat_flt)$mgi_symbol %>% unlist
+
+dds_annot_col <- colData(dat_flt) %>% data.frame %>% dplyr::select(condition)
+
+dds_annot_row <- data.frame(
+  ir_is = dds_IR_IS_res %>% as.data.frame() %>% dplyr::filter(row.names(dds_IR_IS_res) %in% unlist(ir_is_ensembl_sigs)) %>%
+    dplyr::transmute(ir_is=ifelse(log2FoldChange>0,"up","down"))
+)
+mgi_rownames <- lapply(rownames(dds_annot_row), ensembl_symbol, sExp=dat) %>% unlist
+rownames(dds_annot_row) <- mgi_rownames
+
+dds_annot_colors <- list(condition=c(C="gray",IR="pink", IS="orange"),
+                     ir_c=c(up="red",down="blue"),
+                     is_c=c(up="red",down="blue"),
+                     ir_is=c(up="red",down="blue"))
+  
+## use Euclidean distance for columns/samples
+## use ward as agglomeration rule
+dds.hc01.col <- hcopt(dist(t(assays(dat_flt)$rle_log2)),method="ward.D2")
+
+## use 1-correlation as distance for for rows/genes
+## use ward as agglomeration rule
+dds.hc01.row <- hcopt(as.dist(1-cor(t(assays(dat_flt)$rle_log2))),method="ward.D2")
+```
+
+
+```{r}
+tiff(file=file.path(PATH, "results/ir_is_genes_no_tgfb_heatmap.tiff"), width=7, height=7, res=1200, units="in")
+pheatmap(assays(dat_flt)$rle_log2,
+         annotation_col = dds_annot_col,
+         annotation_row = dds_annot_row,
+         annotation_colors = dds_annot_colors,
+         cluster_rows=dds.hc01.row,
+         cluster_cols=FALSE,
+         show_rownames = TRUE,
+         cellheight = 5,
+         cellwidth = 15,
+         treeheight_row = 5,
+         treeheight_col = 5,
+         fontsize_row = 4,
+         show_colnames = TRUE,
+         scale = "row")
+dev.off()
+
+```
+
+```{r}
+pheatmap(assays(dat_flt)$rle_log2,
+         annotation_col = dds_annot_col,
+         annotation_row = dds_annot_row,
+         annotation_colors = dds_annot_colors,
+         cluster_rows=dds.hc01.row,
+         cluster_cols=FALSE,
+         show_rownames = TRUE,
+         cellheight = 5,
+         cellwidth = 15,
+         treeheight_row = 5,
+         treeheight_col = 5,
+         fontsize_row = 4,
+         show_colnames = TRUE,
+         scale = "row")
+```
+
+# Saving Signatures
+```{r}
+deseq_list <- list(ir_is = dds_IR_IS_res, ir_c = dds_IR_C_res, is_c = dds_IS_C_res,
+                   tgfb_is = dds_TGFB_IS_res, tgfb_c = dds_TGFB_C_res, tgfb_ir = dds_TGFB_IR_res)
+saveRDS(deseq_list,file=file.path(PATH,"data/deseq_list.rds"))
+saveRDS(all_sigs,file=file.path(PATH,"data/signatures_symbol.rds"))
+```
+
+# Log Fold Changes Table
+```{r}
+emt_example <- readxl::read_excel(file.path(PATH, "data/20230203EMT-CISIRTGFB-Fold Change.xlsx"))
+emt_set <- emt_example$geneid
+logfold_df <- data.frame(ir_is = deseq_list$ir_is$log2FoldChange,
+                         ir_c = deseq_list$ir_c$log2FoldChange,
+                         is_c = deseq_list$is_c$log2FoldChange,
+                         tgfb_is = deseq_list$tgfb_is$log2FoldChange,
+                         tgfb_c = deseq_list$tgfb_c$log2FoldChange,
+                         tgfb_ir = deseq_list$tgfb_ir$log2FoldChange)
+test <- lapply(deseq_list, rownames)
+for(i in seq_along(test)) {
+  for(j in seq_along(test)) {
+    stopifnot(all.equal(test[[i]], test[[j]]))
+  }
+}
+
+rownames(logfold_df) <- rownames(deseq_list$ir_is)
+logfold_df <- logfold_df %>% rownames_to_column(var = "geneid")
+logfold_df$genesymbol <- ensembl_symbol(logfold_df$geneid, sExp = dat)
+logfold_df <- logfold_df[,sort(colnames(logfold_df))]
+
+write.csv(logfold_df, file.path(PATH, "data/all_logfold.csv"), row.names = FALSE)
+
+emt_df <- logfold_df %>% filter(genesymbol %in% emt_set) 
+write.csv(emt_df, file.path(PATH, "data/emt_logfold.csv"), row.names = FALSE)
+```
+
